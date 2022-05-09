@@ -119,16 +119,21 @@ are supported:
 
   -e Enlarges the graphics x 2. Useful on platforms that have a screen resolution of at least
      512x384. Ignored if the machine is a BBQL.
+     
   -t TV Mode on a BBQL. Don't try this on other machines. If this is selected, the game will
      not use the leftmost 32 pixels of the screen to make the picture fit to your TV
+     
   -c use a condensed font (9x5) to fit more text to the screen. Definitely recommended if you
      try running this on a BBQL in MODE 8.
+     
   -i Use interlaced graphics mode 8 - This allows some BBQLs to display the graphics in 32
      colours. This is still somewhat experimental and definitely doesn't work on Minerva.
      See tech note below. If this mode irritates you LCD screen (somewhat likely), try
      a real CRT. It usually works better there.
+     
   -f on original QLs, dither the original Amiga pictures instead of simply displaying them
      in the closest QL colours. Takes a bit of speed, but produces much nicer pictures.
+     
   -q assume we're running on a QL. Useful if you want to run the game on a "better"
      platform in MODE 8 (why would anyone want to do that?)
    
