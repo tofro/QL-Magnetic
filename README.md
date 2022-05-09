@@ -102,7 +102,7 @@ Running the games on various machine types
 The game detects on what type of machine it runs and makes some humble attempts to adapt.
 
 Original support is currently experimental. Your mileage may vary. Note, you need at least a
-Trump card to run the game at all, for optimal experience, a GoldCard or SGC plus SMSQ/E is recommended.
+Trump card to run the game at all, for optimal experience, a GoldCard or SGC plus SMSQ/E is recommended. Expect the games to run really slow on non-accelerated platforms.
 
 The games should work to various extents on all recent QL platforms except uQLX. I have tested on
 QXL, Q40, QPC, Q68, Trump Card QL, GC and SGC QL.
