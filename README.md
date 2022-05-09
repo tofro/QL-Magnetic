@@ -129,7 +129,7 @@ are supported:
   -i Use interlaced graphics mode 8 - This allows some BBQLs to display the graphics in 32
      colours. This is still somewhat experimental and definitely doesn't work on Minerva.
      See tech note below. If this mode irritates you LCD screen (somewhat likely), try
-     a real CRT. It usually works better there. If it irrotates yourself (likely, it _does_ flicker), try dithering - It's close.
+     a real CRT. It usually works better there. If it irritates yourself (very likely, it _does_ flicker), try dithering - It's close.
      
   -f on original QLs, dither the original Amiga pictures instead of simply displaying them
      in the closest QL colours. Takes a bit of speed, but produces much nicer pictures.
