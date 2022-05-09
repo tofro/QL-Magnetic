@@ -20,6 +20,9 @@ their spirit and the availabilty of the materials on these pages is tolerated.
 Of course this is not a legal entitlement and obviously the materials can only be used
 for personal, strictly non-commercial purposes."
 
+Eager to play?
+Download the "magnetic_zip" file and unpack on a QDOS platform. Don't try on a PC or Mac, or you will loose important header information. Fetch the game files as listed under "Prerequisites". Run the games with "EX win1_magnetic_magnetic_exe;"-c -t -f pawn_mag pawn_gfx""
+
 Credit whom Credit is due
 -------------------------
 
