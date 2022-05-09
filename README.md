@@ -61,7 +61,7 @@ with all the graphics files.
 Prerequisites
 -------------
 Currently, you need a Q68, QXL, QPC or QL with suitable memory extension and disk capacity
-to run the games.
+to run the games (no microdrives, sorry - The games are just too big).
 
 You will need this software unpacked on the QL media - use "unzip" on the QL itself, the
 software will unpack to a directory "magnetic" per default. You'll find a file
