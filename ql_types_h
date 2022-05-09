@@ -1,0 +1,14 @@
+#ifndef QL_TYPES_H
+#define QL_TYPES_H
+
+
+typedef enum {
+    NONE = 0,
+    QPC,
+    Q68,
+    Q40,
+    QXL,
+    QL,
+} machineType;
+
+#endif

@@ -1,0 +1,47 @@
+#ifndef CDB_H
+#define CDB_H
+
+struct ConCDB_t {
+    long    ch_len;
+    char    *ch_drivr;
+    long    ch_owner;
+    char    *ch_rflag;
+    short   ch_tag;
+    char    ch_stat;
+    char    ch_actn;
+    long    ch_jobwt;
+};
+/*    char    ptext[0x30]; */
+struct ConCDBInfo_t {
+    short   sd_xmin;
+    short   sd_ymin;
+    short   sd_xsize;
+    short   sd_ysize;
+    short   sd_borwd;
+    short   sd_xpos;
+    short   sd_ypos;
+    short   sd_xinc;
+    short   sd_yinc;
+    char    *sd_font1;
+    char    *sd_font2;
+    char    *sd_scrb;
+    long    sd_pmask;
+    long    sd_smask;
+    long    sd_imask;
+    char    sd_cattr;
+    char    sd_curf;
+    char    sd_pcolr;
+    char    sd_scolr;
+    char    sd_icolr;
+    char    sd_bcolr;
+    char    sd_nlsta;
+    char    sd_fmod;
+    char    sd_yorg[6];
+    char    sd_xorg[6];
+    char    sd_scal[6];
+    char    *sd_fbuf;
+    char    *sd_fuse;
+    short   sd_linel;
+};
+
+#endif

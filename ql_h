@@ -1,0 +1,31 @@
+#ifndef QL_H
+#define QL_H
+
+#include "ql_types_h"
+
+extern int STATUSWIDTH;
+extern int statusWindow;
+extern int mainWindow;;
+extern int WIDTH;
+extern int linesPrinted;
+
+extern int tvMode;
+extern int monoMode;
+extern int interlaced;
+extern int dithered;
+extern int condensed;
+extern int enlarge;
+
+extern machineType machine;
+
+void ql_show_pic (type32 c,type8 mode);
+void ql_statuschar (type8 c);
+void ql_flush (void);
+void ql_putchar (type8 c);
+type8 ql_getchar (type8 trans);
+machineType ql_getMachineType (void);
+void ql_screenInit (void);
+void ql_screenClose (void);
+void ql_setGameName (char*);
+
+#endif

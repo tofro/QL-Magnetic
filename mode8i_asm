@@ -1,0 +1,310 @@
+*************************************************************************************
+* MODE_8i_asm
+*
+* Dithvide implementation in a real application
+*
+*************************************************************************************
+*
+* don't forget SV Stack needs to move as well!
+*
+*
+        LIST
+
+        INCLUDE 'win1_assembler_qdos1_in'
+        INCLUDE 'win1_assembler_qdos2_in'
+        INCLUDE 'win1_assembler_macro_lib'
+
+        XREF    ipcom
+
+sspSize EQU     800                     ; start with 400 bytes of supervisor stack        
+svplist EQU     $2803c
+sviList EQU     $28038
+svsList EQU     $28040
+sysqlmr EQU     $28034
+sysqlir EQU     $28035
+
+interrupt EQU   0
+
+MC_LORES EQU    %00001000               ; make sure bit 3 is set here!
+
+* Macro for Macro-supported unrolled loops
+REPT    MACRO   num,args
+        LOCAL   count,pIndex,pCount
+count   SETNUM  1
+lp      MACLAB
+pCount  SETNUM  [.NPARMS]-1
+pIndex  SETNUM  2
+pLoop   MACLAB
+        EXPAND
+        [.PARM([pIndex])]
+        NOEXPAND
+pCount  SETNUM  [pCount]-1
+pIndex  SETNUM  [pIndex]+1
+        IFNUM   [pCount] > 0 GOTO pLoop
+count   SETNUM  [count]+1
+        IFNUM   [count] <= [num] GOTO lp
+        ENDM        
+
+        SECTION code
+
+secondScreen    EQU     $28000
+
+
+
+**********************************************************************************
+* Move the following stuff around:
+* 1. System Variables area to save buffer
+* 2. Shadow frame buffer to System Variables area
+*    enter SV mode, shut off interrupts
+*    move supervisor stack!
+*    move new second screen contents to second screen area
+*    loop
+*       flip it!
+*       check for key presses (directly at the hardware)
+*       wait for 50Hz interrupt
+*    until key pressed
+* 3. save buffer to SV area
+* Move supervisor stack as well!
+*
+* C parameters sit on the stack in left-to-right order (ascending offsets)
+*
+* The code busy-waits on the timer interrupt bit in supervisor mode, so
+* effectively shuts off all multitasking until a key is pressed.
+*
+* The calling routine must supply two 32kBytes memory areas: 
+* - memory for the system variables save buffer,
+* - the second screen contents 
+**********************************************************************************
+        XDEF    _interlace
+        XDEF    _memcpyf
+
+        GENIF   interrupt = 0
+
+saveregs REG d0-d7/a0-a6                ; probably too much saved
+
+_interlace
+        lea.l   svsp(pc),a0           
+        
+        move.l  sp,4(a0)                ; save user stack ptr (maybe unneeded)
+        move.l  4(sp),8(a0)             ; save our save ptr (memory allocated for us)
+        move.l  8(sp),12(a0)            ; save where we find the bytes for the second screen
+
+        movem.l saveregs,-(sp)
+
+        trap    #0                      ; enter supervisor mode
+        lea.l   svsp(pc),a0
+        move.l  sp,(a0)                 ; save supervisor stack pointer
+        or.w    #$0700,sr               ; disable interrupts
+
+        lea     newstack(pc),sp         ; set new SSP
+
+        move.l  svBuff(pc),a1           ; target address: supplied buffer
+        lea.l   secondScreen,a0         ; source address: 2nd screen
+        bsr     fastcpy                 ; copy it
+
+        move.l  secScr(pc),a0           ; source address: 2nd screen contents
+        lea.l   secondScreen,a1         ; target address: 2nd screen
+        bsr     fastcpy                 ; copy it
+
+        bset    #3,PC_INTR
+        lea.l   dispCtl(pc),a0
+        move.b  #MC_LORES,(a0)          ; make sure its set correctly
+intLp   move.b  PC_INTR,d1              ; wait for 50Hz interrupt
+        btst    #3,d1
+        beq     intLp                   ; no, busy wait
+        
+        eor.b   #$80,(a0)               ; flip pages
+        move.b  (a0),MC_STAT
+
+        bsr     ipcom                   ; check keyboard like SMSQ/E does!
+
+        tst.b   d1                      ; Key pressed?
+        bne.s   keyPressed              ; Yes, exit
+notKey  bset     #3,PC_INTR
+        bra.s   intLp                   ; loop around forever
+
+keyPressed
+        move.b  #MC_LORES,MC_STAT       ; back to normal screen, mode 4
+        move.l  svBuff(pc),a0           ; source address: where we saved the System Variables
+        lea.l   secondScreen,a1         ; destination: Back where it belongs
+        bsr     fastcpy                 ; copy it
+        move.l  svsp(pc),sp             ; restore old supervisor stack pointer
+
+        move.b  sysqlmr,MC_STAT         ; restore master chip register from SV
+        move.b  sysqlir,PC_INTR         ; restore interrupt register from SV
+
+        move.w  #$0800,sr               ; enable interrupts, back to user mode
+
+        movem.l (sp)+,saveregs
+
+        clr.l   d0                      ; C return value
+        rts        
+        ENDGEN
+
+* This version does more or less the same, but with a number of caveats:
+* - Enables interrupts while interlaced picture is displayed.
+* - That /might/ allow control of OS functions by ISRs
+* - Note the ISR redirections are part of the system variables overwritten 
+*   by the picture! Polling interrupt is set to our routine, scheduler and
+*   external interrupt to a "do nothing" routine.
+*   Still, the OS seems to flicker some pixels in the upper screen lines
+*   Overall: A bit on the edge. Works for some minutes, then crashes 
+*   (which might actually be caused by MT.IPCOM trap!)
+*   Not used in Magnetic, but left in here as a bad example that needs fixing.
+        GENIF   interrupt = 1
+_interlace
+        lea.l   svsp(pc),a0           
+        
+        move.l  sp,4(a0)                ; save user stack ptr (maybe unneeded)
+        move.l  4(sp),8(a0)             ; save our save ptr (memory allocated for us)
+        move.l  8(sp),12(a0)            ; save where we find the bytes for the second screen
+
+;        movem.l d0-d7/a0-a6,-(sp)
+        lea.l   dispCtl(pc),a0
+        move.b  #MC_LORES,(a0)          ; first screen displayed
+
+        lea     pollLnk(pc),a1          ; add proper address to link
+        lea     flip(pc),a2             ; this is where we want to jump to (polling routine)
+        move.l  a2,4(a1)                ; put address to link
+
+        trap    #0                      ; enter supervisor mode
+        lea.l   svsp(pc),a0
+        move.l  sp,(a0)                 ; save supervisor stack pointer
+        or.w    #$0700,sr               ; disable interrupts
+        lea     newstack(pc),sp         ; set new SSP
+        move.l  svBuff(pc),a1           ; target address: supplied buffer
+        lea.l   secondScreen,a0         ; source address: 2nd screen
+        bsr     fastcpy                 ; copy it
+        move.l  secScr(pc),a0           ; source address: 2nd screen contents
+        lea.l   secondScreen,a1         ; target address: 2nd screen
+        bsr     fastcpy                 ; copy it
+        bsr.s   enableInterlace         ; enable screen flipping
+        ;andi.w  #$f8ff,sr               ; Enable interrupts
+        move.w  #0,d7
+        
+r_loop
+        moveq.l #0,d1
+        add.b   #1,d7
+        bne.s   r_loop
+
+        bsr     ipcom                   ; check keyboard
+notKey  
+        tst.b   d1                      ; Key pressed?
+        bne.s   key                     ; Yes, exit
+        bra.s   r_loop                  ; loop around forever
+
+;        bsr     waitKey                 ; wait for anything from 8049
+ipccmd  dc.l    $09010000               ;IPC command
+        dc.l    $00000102               ;9=kbd,1=4bits in,2=8bits out (set to read row 1)
+
+key:
+        or.w    #$0700,sr               ; disable interrupts
+        ;bsr     disableInterlace        ; disable screen flipping
+        move.b  #MC_LORES,MC_STAT      ; back to normal screen, mode 8
+        move.l  svBuff(pc),a0           ; source address: where we saved the System Variables
+        lea.l   secondScreen,a1         ; destination: Back where it belongs
+        bsr     fastcpy                 ; copy it
+        ;andi.w  #$f8ff,sr               ; Enable interrupts
+        move.l  svsp(pc),sp             ; restore old supervisor stack pointer
+        move.w  #$0800,sr               ; enable interrupts, back to user mode
+;        movem.l (sp)+,d0-d7/a0-a6
+        clr.l   d0                      ; C return value
+        rts        
+
+* add routine to polling interrupt
+enableInterlace 
+        lea     pollLnk,a0
+        lea     flip(pc),a2
+        move.l  a2,4(a0)
+        move.l  a0,svplist
+        lea.l   emptyLnk,a0
+        lea     doNothing(pc),a2 
+        move.l  a2,4(a0) 
+        move.l  a0,sviList              ; make sure list of ISRs is set to empty
+        move.l  a0,svsList
+
+        rts
+        ENDGEN
+
+ 
+
+* Remove polling routine
+disableInterlace
+        lea     pollLnk,a0
+        QDOSMT$ MT.RPOLL
+        bclr.b   #7,MC_STAT             ; make sure we end up on the proper page
+        clr.b   MC_STAT
+        rts
+
+* Polling interrupt routine: Flips first and second screen
+flip
+        
+        lea.l   dispCtl(pc),a0
+        eor.b   #$80,(a0)               ; flip bit 7 of MC_STAT to FLIP display memory
+        move.b  (a0),MC_STAT
+        
+        rts
+
+
+
+************************************************************************************************
+* memcpyf
+* Optimized 32k block copy of memory
+* a0 points to source, a1 to destination
+************************************************************************************************
+
+_memcpyf
+        lea.l   svsp(pc),a0           
+        move.l  4(sp),8(a0)             ; first argument
+        move.l  8(sp),12(a0)            ; second one      
+        move.l  12(a0),a1               ; destination address
+        move.l  8(a0),a0                ; source         
+        bsr     fastcpy
+doNothing
+        rts
+
+pollLnk
+        dc.l    0
+        dc.l    0
+
+emptyLnk
+        dc.l    0
+        dc.l    0
+
+**********************************************************************************
+* Data area
+**********************************************************************************
+        SECTION data
+svsp    dc.l    0       ; save old supervisor stack ptr here
+ussp    dc.l    0       ; save old user stack pointer here (just in case)
+svBuff  dc.l    0       ; this holds the address of where we're saving the SV
+secScr  dc.l    0       ; this holds the address of where our second screen buffer is
+dispCtl dc.b    MC_LORES  ; MC_LORES shadow of display control register
+        dc.b    0       ; FOLLOWING LABELS ON EQUAL ADDRESSES!
+        ds.b    sspSize ; this is the intermediate supervisor stack
+newstack        
+
+        SECTION code
+************************************************************************************
+* fastcpy
+* A routine to copy screen contents to memory as fast as possible
+* moves 32k from (a0) to (a1)
+* Trade-off of memory vs. execution speed, using unrolled loops
+************************************************************************************
+CPYREGS REG     d1-d7/a2-a6        
+fastcpy
+        movem.l CPYREGS,-(sp)
+        move.w  #32-1,d0
+cpyLp     
+        ; one of these REPTs copies 48*50 = 2400 bytes 
+        REPT    32,{movem.l (a0)+,d1-d7/a2},\
+                   {movem.l d1-d7/a2,(a1)},\
+                   {adda.l #32,a1}        
+        dbra    d0,cpyLp
+   
+        movem.l (sp)+,CPYREGS
+        rts
+
+      
+
+        END

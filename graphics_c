@@ -1,0 +1,1218 @@
+/* graphics_c - An implementation for putting bitmaps into the QL's screen */
+
+/*
+ * Initialize graphics module:
+ * - set screen mode
+ * - find screen extents and other screen features like memory location
+ *   and available planes, 2nd screen and more
+ * - build accelerator table structures
+ *
+ * Assumption is that once we have called graphicsInit, all screen parameters
+ * will remain constant - We do not support multiple screen layouts, modes,
+ * anything.
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <qdos.h>
+#include <qptr.h>
+#include <memory.h>
+#include <assert.h>
+
+#include "concdb_h"
+
+#include "graphics.h"
+
+#undef NDEBUG
+
+// size of fill stack - adjust for complicated forms
+#define FSTACKSIZ 1024
+
+// #define register
+/* This is the low-level functions' "this"-pointer */
+static GScreen_t *theScreen = NULL;
+
+/* This is a mask for mode 4 that allows pixmaps to shift and mask */
+const unsigned long shl_mask[] = {
+    0x80000000UL,
+    0xc0000000UL,
+    0xe0000000UL,
+    0xf0000000UL,
+};
+
+// A (half-private) function to get the screen variable for friend modules, but
+// not intended for user code to mess around with...
+GScreen_t *getScreen()
+{
+   return theScreen;
+}
+
+/* This function fills the line start table of addresses after we have enough */
+/* knowledge on the video mode and memory layout.                             */
+static void fillLST(GScreen_t *screen)
+{
+   int i;
+
+   if (screen->lineStartTab != NULL)
+      free(screen->lineStartTab);
+   screen->lineStartTab = (unsigned char **)malloc(screen->yPix * sizeof(char *));
+   assert (screen->lineStartTab != NULL);
+
+   screen->lineStartTab[0] = screen->baseAddress;
+   for (i = 1; i < screen->yPix; i++)
+   {
+      screen->lineStartTab[i] = screen->lineStartTab[i - 1] + screen->lineLen;
+   }
+}
+
+/* Holds pixel mask information for mode 4 pixels, left to right */
+static const unsigned short m4PixelMask[] = {0x7f7fU, 0xbfbfu, 0xdfdfu, 0xefefu, 0xf7f7u, 0xfbfbu, 0xfdfdu, 0xfefeu};
+/* Holds inverted pixel mask information for mode 4 pixels, left to right */
+static const unsigned short m4InvPixelMask[] = {0x8080u, 0x4040u, 0x2020u, 0x1010u, 0x0808u, 0x0404u, 0x0202u, 0x0101u};
+/* Color mask (doubled up because black is 0 and 1) for setting all eight pixels to the respective color */
+static const unsigned short m4ColorMask[] = {0x0000u, 0x0000u, 0x00ffu, 0x00ffu, 0xff00u, 0xff00u, 0xffffu, 0xffffu};
+
+/************************************************/
+/* Graphics functions for mode 4                */
+/************************************************/
+
+// plot4 - mode 4 specific plot
+// Plot a pixel of color col at screen coordinatex x, y
+// coordinates are _not_ checked for validity!
+void plot4(int x, int y, int col)
+{
+   register const unsigned int iDiv = 7;
+
+   // Pick up some interesting values into registers
+   register unsigned short *screenWord = (unsigned short *)theScreen->lineStartTab[y];
+   register unsigned short pixelMask = m4PixelMask[x & iDiv];
+   register unsigned short invPixelMask = m4InvPixelMask[x & iDiv];
+   register unsigned short colorMask = m4ColorMask[col & iDiv];
+
+   // Position screenWord to the proper address + (x / 8), because of 8 pixels/word!
+   screenWord += (unsigned)x >> 3;
+
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix) || (col > iDiv) || (x < 0) || (y < 0))
+      return;
+
+   /* Clear the relevant pixel to black */
+   *screenWord &= pixelMask;
+   /* mask out all other pixels than the needed one in the colorMask */
+   colorMask &= invPixelMask;
+   /* Put color into screen */
+   *screenWord |= colorMask;
+}
+
+// getPixel4 - mode 4 specific getPixel
+// Get the color of a pixel at screen coordinatex x, y
+// coordinates are _not_ checked for validity!
+// The pixel check loop at the end should be revisited...
+int getPixel4(int x, int y)
+{
+   register const unsigned int iDiv = 7;
+   unsigned short screen;
+   int i;
+
+   // Pick up some interesting values into registers
+   register unsigned short *screenWord = (unsigned short *)theScreen->lineStartTab[y];
+   register unsigned short pixelMask = m4PixelMask[x & iDiv];
+   register unsigned short invPixelMask = m4InvPixelMask[x & iDiv];
+
+   // Position screenWord to the proper address + (x / 8), because of 8 pixels/word!
+   screenWord += x >> 3;
+
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix))
+      return -1;
+
+   /* Pick up the relevant word from screen memory */
+   screen = *screenWord;
+   /* Filter out the pixel we are interested in */
+   screen &= pixelMask;
+
+   /* find out the color of our pixel in a loop */
+   for (i = sizeof(m4ColorMask) / sizeof(m4ColorMask[0]) - 1; i >= 0; i--)
+      if (screen > m4ColorMask[i])
+         return i;
+   return 0;
+}
+
+// floodfill - generic floood fill algorithm. Adjust FSTACKSIZ for very complex fills.
+void floodFill(int x, int y, int oldCol, int newCol)
+{
+   unsigned short x1, xc, yc;
+   char spanAbove, spanBelow = 0;
+   Coordinate_t fillStack[FSTACKSIZ];
+   int stackCtr = 0;
+
+   if (oldCol == newCol) {
+      // nothing to do
+      return;
+   }
+
+   fillStack[stackCtr].x = x;
+   fillStack[stackCtr++].y = y;
+
+   while (stackCtr > 0)
+   {
+      xc = fillStack[--stackCtr].x;
+      yc = fillStack[stackCtr].y;
+
+      x1 = xc;
+
+      // search left boundary
+      while ((x1 >= 0) && (theScreen->getPixel(x1, yc) == oldCol))
+      {
+         x1--;
+      }
+      x1++;
+      spanAbove = spanBelow = 0;
+
+      // search right boundary
+      while ((x1 < theScreen->yPix) && (theScreen->getPixel(x1, yc) == oldCol))
+      {
+         theScreen->plot(x1, yc, newCol);
+
+         // look in scanline above
+         if ((!spanAbove) && (yc > 0) && (theScreen->getPixel(x1, yc - 1) == oldCol))
+         {
+            fillStack[stackCtr].x = x1;
+            fillStack[stackCtr++].y = yc - 1;
+            spanAbove = 1;
+         }
+         else if (spanAbove && (yc > 0) && (theScreen->getPixel(x1, yc - 1) != oldCol))
+            spanAbove = 0;
+
+         if ((!spanBelow) && (yc < (theScreen->yPix - 1)) && (theScreen->getPixel(x1, yc + 1) == oldCol))
+         {
+            fillStack[stackCtr].x = x1;
+            fillStack[stackCtr++].y = yc + 1;
+            spanBelow = 1;
+         }
+         else if (spanBelow && (yc < theScreen->yPix - 1) && (theScreen->getPixel(x1, yc + 1) != oldCol))
+         {
+            spanBelow = 0;
+         }
+         x1++;
+      }
+   }
+}
+
+// Good morning, Mister Bresenham!
+// line - generic line drawing function
+void line(int x1, int y1, int x2, int y2, int col)
+{
+   register int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+   register int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+   register int err = dx + dy, e2; /* error value e_xy */
+
+   while (1)
+   {
+      theScreen->plot(x1, y1, col);
+      if (x1 == x2 && y1 == y2)
+         break;
+      e2 = 2 * err;
+
+      if (e2 > dy)
+      {
+         err += dy;
+         x1 += sx;
+      } /* e_xy+e_x > 0 */
+
+      if (e2 < dx)
+      {
+         err += dx;
+         y1 += sy;
+      } /* e_xy+e_y < 0 */
+   }
+}
+
+// Good morning, Mr. Bresenham, again!
+// I wonder if you can also do circles?
+// This routine should work for all modes, because it uses the plot() function
+void circle(int x0, int y0, int radius, int col)
+{
+   int f = 1 - radius;
+   int ddF_x = 0;
+   int ddF_y = -2 * radius;
+   int x = 0;
+   int y = radius;
+
+   theScreen->plot(x0, y0 + radius, col);
+   theScreen->plot(x0, y0 - radius, col);
+   theScreen->plot(x0 + radius, y0, col);
+   theScreen->plot(x0 - radius, y0, col);
+
+   while (x < y)
+   {
+      if (f >= 0)
+      {
+         y--;
+         ddF_y += 2;
+         f += ddF_y;
+      }
+      x++;
+      ddF_x += 2;
+      f += ddF_x + 1;
+
+      theScreen->plot(x0 + x, y0 + y, col);
+      theScreen->plot(x0 - x, y0 + y, col);
+      theScreen->plot(x0 + x, y0 - y, col);
+      theScreen->plot(x0 - x, y0 - y, col);
+      theScreen->plot(x0 + y, y0 + x, col);
+      theScreen->plot(x0 - y, y0 + x, col);
+      theScreen->plot(x0 + y, y0 - x, col);
+      theScreen->plot(x0 - y, y0 - x, col);
+   }
+}
+
+// Dump a rectangular block to the screen
+// optimized to only use plot at the left and right edges, and direct
+// full unsigned short access where possible
+// mode 4 specific block function
+void block4(int x1, int y1, int w, int h, int col)
+{
+   unsigned int xr1;
+   unsigned int xr2;
+   unsigned int line;
+   int i;
+   int shortDiff;
+   register unsigned short *screenWord;
+
+   // find end of accessable screen memory
+   unsigned short *upperLimit = (unsigned short *)(theScreen->lineStartTab[theScreen->yPix - 1] + theScreen->lineLen - 1);
+   register int xLim = theScreen->xPix;
+   register int yLim = theScreen->yPix;
+   int numPixels;
+
+   xr1 = (x1 + 7) & 0xfffffff8u; // remove non-short-aligned pixels at the beginning (round up to the next pixel/byte boundary)
+   xr2 = (x1 + w) & 0xfffffff8u; // remove non-short-aligned pixels at the end (floor to the next pixel/byte boundary)
+
+   /* This is how many full screen shorts we can fill */
+   shortDiff = abs(xr2 - xr1) >> 3;
+
+   for (line = 0; line < h; line++)
+   {
+
+      // Are we trying to draw outside limits?
+      if ((line + y1) >= theScreen->yPix)
+         return;
+
+      screenWord = (unsigned short *)(theScreen->lineStartTab[y1 + line] + (xr1 >> 2));
+
+      // Draw pixels left of short-aligned border
+      numPixels = xr1 - x1;
+      //printf ("numPixels 1: %d\n", numPixels);
+      for (i = 0; i < numPixels; i++)
+      {
+         plot4(x1 + i, y1 + line, col);
+      }
+
+      // Draw short-aligned pixels
+      for (i = 0; (i < shortDiff) && (screenWord < upperLimit) /* && (screenWord < theScreen->lineStartTab [y1 + line + 1])*/; i++)
+      {
+         *screenWord++ = m4ColorMask[col & 7];
+      }
+
+      // draw remaining right pixels
+      numPixels = (x1 + w) - xr2;
+      for (i = 0; i < numPixels; i++)
+      {
+         plot4(xr2 + i, y1 + line, col);
+      }
+   }
+}
+
+// Brute force filled circle algorithm
+// (plot everything in a square that also fits in a circle)
+// fcircle - generic filled circle function
+void fCircleBrute(int x0, int y0, int r, int c)
+{
+   register int x, y;
+   register int lim = r * r + r;
+
+   for (y = -r; y <= r; y++)
+      for (x = -r; x <= r; x++)
+         if (x * x + y * y < lim)
+            theScreen->plot(x0 + x, y0 + y, c);
+}
+
+// Alternative implementation of fcircle
+void fCircle(int x0, int y0, int radius, int col)
+{
+   int xoff = 0;
+   int yoff = radius;
+   int balance = -radius;
+
+   while (xoff <= yoff)
+   {
+      int p0 = x0 - xoff;
+      int p1 = x0 - yoff;
+      int w0 = xoff + xoff;
+      int w1 = yoff + yoff;
+
+      theScreen->block(p0, y0 + yoff, w0, 1, col);
+      theScreen->block(p0, y0 - yoff, w0, 1, col);
+
+      theScreen->block(p1, y0 + xoff, w1, 1, col);
+      theScreen->block(p1, y0 - xoff, w1, 1, col);
+
+      if ((balance += (xoff++ + xoff)) >= 0)
+      {
+         balance -= (--yoff + yoff);
+      }
+   }
+}
+
+// cls - generic cls function
+void cls()
+{
+   // This has some assumptions on lines being contiguos in memory. Might not
+   // work when we are rendering to windows or on Aurora.
+   memset(theScreen->lineStartTab[0], 0, theScreen->lineLen * theScreen->yPix);
+}
+
+/* Holds pixel mask information for mode 8 pixels */
+static const unsigned short m8PixelMask[] = {0x3f3fu, 0xcfcfu, 0xf3f3u, 0xfcfcu};
+static const unsigned short m8InvPixelMask[] = {0xc0c0u, 0x3030u, 0x0c0cu, 0x0303u};
+
+/* Color mask for setting all four pixels to the respective color */
+/*                                           black    blue     red      magenta  green    cyan     yellow   white */
+static const unsigned short m8ColorMask[] = {0x0000u, 0x0055u, 0x00aau, 0x00ffu, 0xaa00u, 0xaa55u, 0xaaaau, 0xaaffu};
+// Graphics functions for mode 8
+void plot8(int x, int y, int col)
+{
+   register const unsigned int iDiv = 3;
+
+   // Pick up some interesting values into registers
+   register unsigned short *screenWord = (unsigned short *)theScreen->lineStartTab[y];
+   register unsigned short pixelMask = m8PixelMask[x & iDiv];
+   register unsigned short invPixelMask = m8InvPixelMask[x & iDiv];
+   register unsigned short colorMask = m8ColorMask[col & 7];
+
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix) || (x < 0) || (y < 0))
+      return;
+
+   col = col & 7;
+
+   // Position screenWord to the proper address + (x / 4), because of 4 pixels/word!
+   screenWord += (unsigned)x >> 2;
+
+   /* Clear the relevant pixel to black */
+   *screenWord &= pixelMask;
+   /* mask out all other pixels than the needed one in the colorMask */
+   colorMask &= invPixelMask;
+   /* Put color into screen */
+   *screenWord |= colorMask;
+}
+
+/* Holds pixel mask information for mode 8 pixels */
+static const unsigned short m8iPixelMask[] = {0x7f3fu, 0xdfcfu, 0xf7f3u, 0xfdfcu};
+static const unsigned short m8iInvPixelMask[] = {0x80c0u, 0x2030u, 0x080cu, 0x0203u};
+
+/* Color mask for setting all four pixels to the respective color */
+/*                                            black    blue     red      magenta  green    cyan     yellow   white */
+static const unsigned short m8iColorMask[] = {0x0000u, 0x0055u, 0x00aau, 0x00ffu, 0xaa00u, 0xaa55u, 0xaaaau, 0xaaffu};
+// Graphics functions for mode 8i
+// Here we have 2 interlaced MODE8 planes.
+void plot8i(int x, int y, int col)
+{
+   register const unsigned int iDiv = 3;
+   int firstCol = col & 7, secondCol;
+
+   // Pick up some interesting values into registers
+   register unsigned short *screenWord = (unsigned short *)theScreen->lineStartTab[y];
+   register unsigned short pixelMask = m8PixelMask[x & iDiv];
+   register unsigned short invPixelMask = m8InvPixelMask[x & iDiv];
+   register unsigned short colorMask = m8ColorMask[firstCol & 7];
+
+   /* check screen limits */
+   if ((x > theScreen->xPix) || (y > theScreen->yPix) || (x < 0) || (y < 0))
+      return;
+
+   // Position screenWord to the proper address + (x / 4), because of 4 pixels/word!
+   screenWord += (unsigned)x >> 2;
+
+   /* Clear the relevant pixel to black */
+   *screenWord &= pixelMask;
+   /* mask out all other pixels than the needed one in the colorMask */
+   colorMask &= invPixelMask;
+   /* Put color into screen */
+   *screenWord |= colorMask;
+
+   secondCol = (col >> 8) & 7;
+   colorMask = m8ColorMask[secondCol & 7];
+
+   // Position screenWord to the proper address + (x / 4), because of 4 pixels/word!
+   // use the second screen in case we are displaying, else shadow buffer
+   if (theScreen->displaying)
+      screenWord += 0x8000;
+   else
+      screenWord = (unsigned short *)(((unsigned)screenWord - 0x20000) + (unsigned)theScreen->shadow);
+
+   /* Clear the relevant pixel to black */
+   *screenWord &= pixelMask;
+   /* mask out all other pixels than the needed one in the colorMask */
+   colorMask &= invPixelMask;
+   /* Put color into screen */
+   *screenWord |= colorMask;
+}
+
+static void doNothing()
+{
+   // doNothing ;)
+}
+
+// displays interlaced screen
+static void display()
+{
+}
+
+void block8(int x1, int y1, int w, int h, int col)
+{
+   unsigned int xr1;
+   unsigned int xr2;
+   unsigned int line;
+   int i;
+   int shortDiff;
+   register unsigned short *screenWord;
+
+   // find end of accessable screen memory
+   unsigned short *upperLimit = (unsigned short *)(theScreen->lineStartTab[theScreen->yPix - 1] + theScreen->lineLen - 1);
+   register int xLim = theScreen->xPix;
+   register int yLim = theScreen->yPix;
+   int numPixels;
+
+   xr1 = (x1 + 3) & 0xfffffffcu; // remove non-short-aligned pixels at the beginning (round up to the next pixel/byte boundary)
+   xr2 = (x1 + w) & 0xfffffffcu; // remove non-short-aligned pixels at the end (floor to the next pixel/byte boundary)
+
+   /* This is how many full screen shorts we can fill */
+   shortDiff = abs(xr2 - xr1) >> 2;
+
+   for (line = 0; line < h; line++)
+   {
+
+      // Are we trying to draw outside limits?
+      if ((line + y1) >= theScreen->yPix)
+         return;
+
+      screenWord = (unsigned short *)(theScreen->lineStartTab[y1 + line] + (xr1 >> 2));
+
+      // Draw pixels left of short-aligned border
+      numPixels = xr1 - x1;
+      //printf ("numPixels 1: %d\n", numPixels);
+      for (i = 0; i < numPixels; i++)
+      {
+         plot8(x1 + i, y1 + line, col);
+      }
+
+      // Draw short-aligned pixels
+      for (i = 0; (i < shortDiff) && (screenWord < upperLimit) /* && (screenWord < theScreen->lineStartTab [y1 + line + 1])*/; i++)
+      {
+         *screenWord++ = m8ColorMask[col & 7];
+      }
+
+      // draw remaining right pixels
+      numPixels = (x1 + w) - xr2;
+      for (i = 0; i < numPixels; i++)
+      {
+         plot8(xr2 + i, y1 + line, col);
+      }
+   }
+}
+
+int getPixel8(int x, int y)
+{
+}
+
+// Graphics functions for mode 256. Those are the most simple, all byte-sized pixels
+void plot256(int x, int y, int col)
+{
+   register unsigned char *screenByte;
+
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix) || (col > 256) || (x < 0) || (y < 0))
+      return;
+
+   screenByte = theScreen->lineStartTab[y] + x;
+   *screenByte = col;
+}
+
+int getPixel256(int x, int y)
+{
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix) || (x < 0) || (y < 0))
+      return -1;
+
+   return *(theScreen->lineStartTab[y] + x);
+}
+
+void block256(int x1, int y1, int w, int h, int col)
+{
+   int i, j;
+
+   for (i = 0; i < w; i++)
+   {
+      for (j = 0; j < h; j++)
+      {
+         plot256(x1 + i, y1 + j, col);
+      }
+   }
+}
+
+/***************************************************/
+/* Graphics functions for Hi-color modes 32 and 33 */
+/***************************************************/
+
+// plotHi
+// Plot a pixel of color col at screen coordinatex x, y
+// coordinates are _not_ checked for validity!
+void plotHi(int x, int y, int col)
+{
+
+   // Pick up some interesting values into registers
+   register unsigned short *screenWord = (unsigned short *)theScreen->lineStartTab[y];
+
+   // Position screenWord to the proper address + (x / 8), because of 8 pixels/word!
+   screenWord += x;
+
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix) || (x < 0) || (y < 0))
+      return;
+
+   /* Set the relevant pixel to the color */
+   *screenWord = col;
+}
+
+// getPixelHi
+// Get the color of a pixel at screen coordinatex x, y
+// coordinates are _not_ checked for validity!
+// The pixel check loop at the end should be revisited...
+int getPixelHi(int x, int y)
+{
+   register const unsigned int iDiv = 7;
+   unsigned short screen;
+   int i;
+
+   // Pick up some interesting values into registers
+   register unsigned short *screenWord = (unsigned short *)theScreen->lineStartTab[y];
+
+   screenWord += x;
+
+   /* check screen limits */
+   if ((x >= theScreen->xPix) || (y >= theScreen->yPix))
+      return -1;
+
+   /* Pick up the relevant word from screen memory */
+   screen = *screenWord;
+   return screen;
+}
+
+// Dump a rectangular block to the screen
+// optimized to only use plot at the left and right edges, and direct
+// full unsigned short access where possible
+// NOTENOTE: Blocks of height 1 do not seem to work properly
+void blockHi(int x1, int y1, int w, int h, int col)
+{
+   unsigned int line;
+   int i;
+   int shortDiff;
+   register unsigned short *screenWord;
+
+   register int xLim = theScreen->xPix;
+   register int yLim = theScreen->yPix;
+   int numPixels;
+
+   // check and adjust limits (somewhat)
+   if (x1 < 0)
+   {
+      w += x1;
+      x1 = 0;
+   }
+
+   if (w < 0)
+      w = 0;
+
+   if (y1 < 0)
+   {
+      h += y1;
+      y1 = 0;
+   }
+
+   if (h < 0)
+      h = 0;
+
+   if (x1 > xLim)
+      return; // entirely out of range
+   if (y1 > yLim)
+      return; // entirely out of range
+
+   for (line = 0; (line < h) && ((y1 + line) < yLim); line++)
+   {
+
+      // Are we trying to draw outside limits?
+      screenWord = (unsigned short *)(theScreen->lineStartTab[y1 + line] + (x1 << 1));
+
+      for (i = 0; (i < w) && ((x1 + i) < xLim); i++)
+      {
+         *screenWord++ = col;
+      }
+   }
+}
+
+#ifdef BITMAP
+/* Bitmap shoving functions start here */
+
+/* 
+ * Copy mode 4 screen bits to memory. We copy aligned unsigned shorts
+ * (i.e. some more bits than we need). Needs to be taken into account 
+ * when we copy back to the screen (superfluous pixels need to be 
+ * masked out on the left and right border)
+ * note this simple functions can only copy and put back regions
+ * exactly to the position where they were copied from - No shifting of screen buffer contents
+ * is done.
+ *
+ * In case buf is non-null, it will be used, if not, a new buffer suitable for the general case
+ * of housing w x h  pixels will be allocated and returned. Note the allocated memory also has 
+ * room for non-word-aligned pixels (one word more left and right per line than what is needed)
+ *
+ * We also store most information we will need to restore the screen area in the buffer - we don't
+ * really want to calculate this twice.
+ */
+QLModeBuffer_t *scrToMem4(QLModeBuffer_t *buf, int x, int y, int w, int h)
+{
+   register QLModeBuffer_t *buffer;
+   register short lineLen;
+   register int i, j;
+   int xr1, xr2;
+   unsigned short *buffPtr, *screenPtr;
+
+   // How many shorts do we need per line?
+   lineLen = w / 8 + ((x % 8) ? 1 : 0) + (((x + w) % 8) ? 1 : 0);
+
+   // find the start address of the top line in screen memory
+   screenPtr = (unsigned short *)(theScreen->lineStartTab[y] + (unsigned)(x >> 3));
+
+   if (buf == NULL)
+   {
+      buffer = malloc(sizeof(QLModeBuffer_t) + lineLen / 2 * h * sizeof(unsigned short));
+      assert (buffer != NULL);
+   }
+   else
+   {
+      buffer = buf;
+   }
+
+   assert(buffer != NULL);
+
+   buffer->lineLen = lineLen;
+   buffer->x = x;
+   buffer->y = y;
+   buffer->w = w;
+   buffer->h = h;
+   buffer->scrStart = screenPtr;
+
+   buffPtr = (unsigned short *)&(buffer->buffer);
+
+   for (i = 0; i < h; i++)
+   {
+      memcpy(buffPtr, screenPtr, lineLen * 2);
+      buffPtr += lineLen;
+      screenPtr += theScreen->lineLen / 2;
+   }
+
+   return buffer;
+}
+
+// Copy memory back to screen - note this simple functions can only copy and put back regions
+// exactly to the position where they were copied from - No shifting of screen buffer contents
+// is done.
+void mem4ToScr(QLModeBuffer_t *buffer)
+{
+   int i;
+   unsigned short *buffPtr = buffer->buffer;
+   unsigned short *screenPtr = buffer->scrStart;
+   short lineLen = buffer->lineLen;
+
+   assert(buffer != NULL);
+
+   for (i = 0; i < buffer->h; i++)
+   {
+      memcpy(screenPtr, buffPtr, lineLen * 2);
+      buffPtr += lineLen;
+      screenPtr += theScreen->lineLen / 2;
+   }
+}
+#endif
+
+// Scroll screen up or down by num pixels
+void scrollScr(int num)
+{
+   int i;
+   size_t lineLen = theScreen->lineLen;
+   int numLines = theScreen->yPix;
+   unsigned char *src, *dst;
+
+   //printf ("Line len: %d, lineStartTab [0]: %p, lineStartTab [1]: %p\n ", lineLen, theScreen->lineStartTab [0], theScreen->lineStartTab [1]);
+   if (num > 0)
+   {
+      // scroll up
+      for (i = 0; i < numLines - num - 1; i++)
+      {
+         src = theScreen->lineStartTab[i + num];
+         dst = theScreen->lineStartTab[i];
+         memcpy(dst, src, lineLen);
+      }
+      // and fill the last line with black
+      for (i = 0; i < num; i++)
+      {
+         memset(theScreen->lineStartTab[theScreen->yPix - i - 1], 0, lineLen);
+      }
+   }
+   else
+   {
+      // scroll down
+      for (i = 0; i < theScreen->yPix - 1; i++)
+      {
+         memcpy(theScreen->lineStartTab[theScreen->yPix - i - 1],
+                theScreen->lineStartTab[theScreen->yPix - i],
+                lineLen);
+      }
+      // and fill the first line with black
+      memset(theScreen->lineStartTab[0], 0, lineLen);
+   }
+}
+
+// scroll screen left or right by num unsigned shorts (one pixel in hi-color)
+void panScr(int num)
+{
+   register int i;
+   register int lineLen = theScreen->lineLen;
+   register int numLines = theScreen->yPix;
+
+   if (num > 0)
+   {
+      // pan left
+      for (i = 0; i < theScreen->yPix - 1; i++)
+      {
+         memcpy(theScreen->lineStartTab[i], theScreen->lineStartTab[i + 1], lineLen);
+      }
+      // and fill the last word with black
+      for (i = 0; i < numLines; i++)
+      {
+         *(theScreen->lineStartTab[i] + (lineLen >> 1)) = 0;
+      }
+   }
+   else
+   {
+      // pan right
+      for (i = 0; i < theScreen->yPix - 1; i++)
+      {
+         memcpy(theScreen->lineStartTab[theScreen->yPix - i - 1],
+                theScreen->lineStartTab[theScreen->yPix - i],
+                lineLen);
+      }
+      // and fill the first word with black
+      for (i = 0; i < numLines; i++)
+      {
+         *(theScreen->lineStartTab[i]) = 0;
+      }
+   }
+}
+
+#ifdef BITMAP
+/* 
+ * Copy mode 32/33 screen bits to memory. We copy aligned unsigned shorts
+ * (i.e. some more bits than we need). 
+ *
+ * note this simple functions can only copy and put back regions
+ * exactly to the position where they were copied from - No shifting of screen buffer contents
+ * is done.
+ *
+ * In case buf is non-null, it will be used, if not, a new buffer suitable for the general case
+ * of housing w x h  pixels will be allocated and returned. Note the allocated memory also has 
+ * room for non-word-aligned pixels (one word more left and right per line than what is needed)
+ *
+ * We also store most information we will need to restore the screen area in the buffer - we don't
+ * really want to calculate this twice.
+ */
+QLModeBuffer_t *scrToMemHi(QLModeBuffer_t *buf, int x, int y, int w, int h)
+{
+   register QLModeBuffer_t *buffer;
+   register short lineLen;
+   register int i, j;
+   int xr1, xr2;
+   unsigned short *buffPtr, *screenPtr;
+
+   // find the start address of the top line in screen memory
+   screenPtr = (unsigned short *)(theScreen->lineStartTab[y] + x);
+
+   if (buf == NULL)
+   {
+      buffer = malloc(sizeof(QLModeBuffer_t) + w * h * sizeof(unsigned short));
+      assert (buffer != 0);
+   }
+   else
+   {
+      buffer = buf;
+   }
+
+   assert(buffer != NULL);
+
+   buffer->lineLen = w;
+   buffer->x = x;
+   buffer->y = y;
+   buffer->w = w;
+   buffer->h = h;
+   buffer->scrStart = screenPtr;
+
+   buffPtr = (unsigned short *)&(buffer->buffer);
+
+   for (i = 0; i < h; i++)
+   {
+      memcpy(buffPtr, screenPtr, w * 2);
+      buffPtr += lineLen;
+      screenPtr += theScreen->lineLen / 2;
+   }
+
+   return buffer;
+}
+
+// Copy memory back to screen - note this simple functions can only copy and put back regions
+// exactly to the position where they were copied from - No shifting of screen buffer contents
+// is done.
+void memHiToScr(QLModeBuffer_t *buffer)
+{
+   int i;
+   unsigned short *buffPtr = buffer->buffer;
+   unsigned short *screenPtr = buffer->scrStart;
+   short lineLen = buffer->lineLen;
+
+   assert(buffer != NULL);
+
+   for (i = 0; i < buffer->h; i++)
+   {
+      memcpy(screenPtr, buffPtr, lineLen * 2);
+      buffPtr += lineLen;
+      screenPtr += theScreen->lineLen / 2;
+   }
+}
+#endif
+
+static void dumpCDB(GScreen_t *screen, struct ConCDB_t *con)
+{
+   struct ConCDBInfo_t *conInfo;
+   char *anyPointer = (char *)con;
+
+   printf("Old screen mode:\t%d\n", screen->oldMode);
+   printf("Old TV mode:    \t%d\n", screen->oldTVMode);
+   printf("New screen mode:\t%d\n", screen->mode);
+   printf("New TV mode     \t%d\n", screen->tvMode);
+   conInfo = (struct ConCDBInfo_t *)(anyPointer + sizeof(struct ConCDB_t));
+   anyPointer = (char *)conInfo;
+
+   if (screen->pifPresent)
+   {
+      printf("Pointer interface present.\n");
+      conInfo = (struct ConCDBInfo_t *)(anyPointer + 0x30);
+   }
+   else
+   {
+      printf("No pointer I/F\n");
+      conInfo = (struct ConCDBInfo_t *)anyPointer;
+   }
+
+   printf("CDB address:     \t%x\n", (void *)con);
+   printf("CDB info address:\t%x\n", (void *)conInfo);
+   printf("Length: \t %ld\n", con->ch_len);
+   printf("Owner:  \t %lx\n", con->ch_owner);
+   printf("xMin:   \t %d\n", conInfo->sd_xmin);
+   printf("yMin:   \t %d\n", conInfo->sd_ymin);
+   printf("xsize:  \t %d\n", conInfo->sd_xsize);
+   printf("ysize:  \t %d\n", conInfo->sd_ysize);
+   printf("borderW:\t %d\n", conInfo->sd_borwd);
+   printf("xPos:   \t %d\n", conInfo->sd_xpos);
+   printf("yPos:   \t %d\n", conInfo->sd_ypos);
+   printf("xInc:   \t %d\n", conInfo->sd_xinc);
+   printf("yInc:   \t %d\n", conInfo->sd_yinc);
+   printf("scrB:   \t %lx\n", conInfo->sd_scrb);
+   printf("Colors:\n");
+   printf("Ink:    \t %d\n", conInfo->sd_icolr);
+   printf("Paper:  \t %d\n", conInfo->sd_pcolr);
+   //printf ("Strip:  \t %d\n",  con->con_info.sd_scolr);
+   printf("Border: \t %d\n", conInfo->sd_bcolr);
+   printf("Line len\t %x\n", conInfo->sd_linel);
+}
+
+// Pick up relevant information from Pointer I/F, if present
+// fills xPix, yPix and pifPresent of the GScreen struct
+static int getPinfo(GScreen_t *screen)
+{
+   long pointerVersion;
+   chanid_t channel_id;
+   int returns = 0;
+                                            
+   /* Must be the primary window of the app! */
+   if ((channel_id = fgetchid(stdout)) > 0)
+   {
+      int pointerVector;
+      if ((pointerVector = (int)iop_pinf(channel_id, -1, &pointerVersion)) > 0)
+      {
+         WM_wsiz_t limits;
+         int error;
+
+         screen->pifPresent = 1;
+
+         error = iop_flim(channel_id, -1, &limits);
+         assert (error >= 0);
+         screen->xPix = limits.xsize;
+         screen->yPix = limits.ysize;
+         // printf ("xPix:\t%d\n", limits.xsize);
+         // printf ("yPix:\t%d\n", limits.ysize);
+         returns = 1;
+      }
+      else
+      {
+         screen->pifPresent = 0;
+      }
+   }
+   return returns;
+}
+
+// Pick up information that can be retrieved from "standard QDOS"
+// fills baseAddress, lineLen, bpp
+// sets preliminary values for xPix and yPix
+// In case P/I is present, mind the extended channel definition block gap */
+static void getChannelInfo(GScreen_t *screen)
+{
+   chanid_t channel_id;
+
+   if ((channel_id = fgetchid(stdout)) > 0)
+   {
+      struct ConCDB_t *con;
+      struct ConCDBInfo_t *conInfo;
+      char *anyPointer;
+
+      char **chbas = (char **)*((char **)(_sys_var + 0x78U));
+      unsigned char **chtop = (unsigned char **)*((unsigned char **)(_sys_var + 0x7cU));
+      con = (struct ConCDB_t *)(chbas[channel_id & 0xff]);
+
+      anyPointer = (char *)con;
+
+      conInfo = (struct ConCDBInfo_t *)(anyPointer + sizeof(struct ConCDB_t));
+      anyPointer = (char *)conInfo;
+
+      if (screen->pifPresent)
+      {
+         conInfo = (struct ConCDBInfo_t *)(anyPointer + 0x30);
+      }
+
+#if 0
+      printf("_sys_var: %p\n", _sys_var);
+      printf("Chbas: %p\n", chbas);
+      printf("Chtop: %p\n", chtop);
+      printf ("Channel id %x\n", channel_id);
+      printf ("Base of chdb: %x\n", con);
+
+      dumpCDB (screen, con);
+#endif
+
+      screen->baseAddress = (unsigned char *)conInfo->sd_scrb;
+      screen->lineLen = conInfo->sd_linel;
+      screen->bpp = 8;
+
+      // This might be wrong on Aurora!
+      //screen->xPix = screen->lineLen / screen->bpp;
+      // Assume 256 y res for now
+      //screen->yPix = 256;
+   }
+}
+
+// Init8i copies the currrent screen into the back buffer and allows new 8i drawings
+void init8i(void) {
+   memcpy(theScreen->shadow, (void*)0x20000, 0x8000);
+}
+
+// TODO:
+// GraphicsInit does not seem to use the right calls to actually /set/ the desired
+// display mode - If the mode doesnt already fit to what we want, QPC seems to
+// simply ignore the change of mode...
+GScreen_t *graphicsInit(int mode)
+{
+   GScreen_t *returns = NULL;
+   int displayMode;
+
+   // Allocate and clear some memory where we can store the
+   // results of our investigations.
+   returns = malloc(sizeof(GScreen_t));
+   assert (returns != NULL);
+   memset(returns, 0, sizeof(GScreen_t));
+
+   // Interlaced modes
+   if (mode == MODE_8i)
+   {
+      displayMode == MODE_8;
+      returns->interlaced = 1;
+      returns->displaying = 0;
+      returns->saveBuffer = malloc(0x8000);
+      assert (returns->saveBuffer != NULL);
+      returns->shadow = malloc(0x8000);
+      assert (returns->shadow != NULL);
+   }
+   else
+      displayMode = mode;
+
+   // Now get the display mode information
+   returns->mode = -1;
+   returns->oldMode = -1;
+   returns->oldTVMode = -1;
+   mt_dmode(&(returns->oldMode), &(returns->oldTVMode));
+
+   //printf ("Old mode: %d, new mode %d\n", returns->oldMode, mode);
+
+   // Is this mode already set, then do nothing!
+   //if (returns->oldMode != mode){
+   // If not, set new mode
+   returns->mode = displayMode;
+   mt_dmode(&(returns->mode), &(returns->oldTVMode));
+
+   //}
+   //else {
+   //   returns->mode = returns->oldMode;
+   //}
+
+   // Get all the information we need from the channel definition block
+
+   // This time only to see if pInf is present...
+   getPinfo(returns);
+   getChannelInfo(returns);
+
+   // This time, to find resolutions
+   if (!returns->pifPresent)
+   {
+      // No Pointer I/F, "guess" resolution for standard BBQL
+      // Note this excludes mode 4/8 with no PE and with higher res screens - There
+      // is simply no conformant/standard way to detect this.
+      switch (mode)
+      {
+      case MODE_4:
+         // 4 colours, 512x256 screen
+         returns->xPix = 512;
+         returns->yPix = 256;
+         break;
+      case MODE_8:
+      case MODE_8i:
+         // 8 colours, 256x256 screen
+         returns->xPix = 512;
+         returns->yPix = 256;
+         // we need to say "512", because that is what the PE says
+         break;
+      case MODE_256:
+         returns->xPix = 512;
+         returns->yPix = 512;
+         break;
+      default:
+         returns->xPix = 256;
+         returns->yPix = 256;
+      }
+      assert (returns->xPix >= 256);
+   }
+
+   returns->display = doNothing;
+
+   switch (mode)
+   {
+   case MODE_4:
+      returns->plot = plot4;
+      returns->line = line;
+      returns->block = block4;
+      returns->circle = circle;
+      returns->fcircle = fCircle;
+      returns->cls = cls;
+      returns->getPixel = getPixel4;
+      returns->bpp = 2;
+      returns->scrToMem = scrToMem4;
+      returns->memToScr = mem4ToScr;
+      returns->scroll = scrollScr;
+      returns->pan = panScr;
+      break;
+   case MODE_8:
+      returns->plot = plot8;
+      returns->line = line;
+      returns->block = block8;
+      returns->circle = circle;
+      returns->fcircle = fCircle;
+      returns->cls = cls;
+      returns->getPixel = getPixel8;
+      returns->bpp = 4;
+      returns->scrToMem = scrToMem4;
+      returns->memToScr = mem4ToScr;
+      returns->scroll = scrollScr;
+      returns->pan = panScr;
+      //returns->xPix = 256;
+      break;
+   case MODE_8i:
+      returns->plot = plot8i;
+      returns->line = line;
+      returns->block = block8;
+      returns->circle = circle;
+      returns->fcircle = fCircle;
+      returns->cls = cls;
+      returns->getPixel = getPixel8;
+      returns->bpp = 4;
+      returns->scrToMem = scrToMem4;
+      returns->memToScr = mem4ToScr;
+      returns->scroll = scrollScr;
+      returns->pan = panScr;
+      returns->display = display;
+      //returns->xPix = 256;
+
+      break;
+   case MODE_256:
+      returns->plot = plot256;
+      returns->line = line;
+      returns->circle = circle;
+      returns->block = block256;
+      returns->cls = cls;
+      returns->floodFill = floodFill;
+      returns->scroll = scrollScr;
+      returns->pan = panScr;
+      returns->getPixel = getPixel256;
+      returns->bpp = 8;
+      break;
+   case MODE_QPCHI:
+   case MODE_QxxHI:
+      returns->plot = plotHi;
+      returns->line = line;
+      returns->block = blockHi;
+      returns->circle = circle;
+      returns->fcircle = fCircle;
+      returns->floodFill = floodFill;
+      returns->cls = cls;
+      returns->getPixel = getPixelHi;
+      returns->bpp = 16;
+      returns->scrToMem = scrToMemHi;
+      returns->memToScr = memHiToScr;
+      returns->scroll = scrollScr;
+      returns->pan = panScr;
+      break;
+   }
+   // Now, some things need to be done last
+   returns->bpp = returns->lineLen * 8 / returns->xPix;
+
+   theScreen = returns;
+
+   // Now create the line start table
+   fillLST(returns);
+
+   return returns;
+}
+
+void graphicsClose(GScreen_t *screen)
+{
+   free(screen->lineStartTab);
+   mt_dmode(&screen->oldMode, &screen->oldTVMode);
+   free(screen);
+   theScreen = NULL;
+}

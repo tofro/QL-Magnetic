@@ -1,0 +1,735 @@
+#include <qdos.h>
+#include <qptr.h>
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+#include <assert.h>
+
+#include "defs.h" 
+#include "graphics.h"
+#include "concdb.h" 
+
+// ************
+// * QL and SMSQ specific functions for Magnetic
+// ************
+
+static int WIDTH = 85;
+static int STATUSWIDTH = 85;
+static int screenHeight = 24; // height of mainWindow in characters
+static int screenPxHeight = 202; // height of mainWindow in pixels
+
+static type8 buffer[80], xpos = 0, bufpos = 0;
+
+/* QL-Specific parts here */
+char _prog_name [] = "Magnetic Scrolls %s                             ";
+
+typedef enum {
+    NONE = 0,
+    QPC,
+    Q68,
+    Q40,
+    QXL,
+    QL,
+} machineType;
+
+typedef enum {
+    modeQL = 0,
+    modeHi
+} screenMode;
+
+GScreen_t *screen;
+chanid_t statusWindow, mainWindow;
+screenMode scrMode = modeQL;
+int linesPrinted = 0;
+int condensed = 0;
+int enlarge = 0;
+int tvMode = 0;
+int monoMode = 0;
+
+machineType machine;
+int interlaced = 0;
+int dithered = 0;
+// System variables are saved here when in interlaced mode
+char *svBuffer = 0;
+
+extern void interlace (unsigned char* saveArea, unsigned char* secondScreen);
+
+#include "smallfont.c"
+
+machineType ql_getMachineType () {
+    const unsigned char * _machineType = (const unsigned char *) ((unsigned)_sys_var + 0xa7U);
+    machineType returns;
+    printf ("Machine %x", _machineType);
+    switch ((*_machineType) & 0x1e) {
+        case 0x1e:
+            returns = QPC;
+            break;
+        case 0x12:
+            returns = Q68;
+            break;
+        case 0x11:
+            returns = Q40;
+            break;
+        case 0x14:
+            returns = QPC;      // actually, SMSQmulator
+            break;
+        case 0x1c:
+            returns = QXL;
+            break;
+        case 0x0c:
+        case 0x0a:
+            returns = QL;
+            break;
+        default:
+            // QDOS does not have this system variable! 
+            returns = QL;
+    }
+    return returns;
+}
+
+// Masks for magnetic colour extraction
+const int red_mask = 0x0700;
+const int red_shift = 8;
+const int green_mask = 0x0070;
+const int green_shift = 4;
+const int blue_mask = 0x0007;
+
+/*
+ * QPC colours are wierd; gggbbbbb rrrrrggg
+ * Q68 is: gggggrrr rrbbbbbw
+ */
+unsigned short RGB8ToRGB16 (unsigned short RGB8) {
+    unsigned short r, b, g;
+    // Bring 3-bit-RGB into 565 RGB format
+    r = (((RGB8 & red_mask)) >> red_shift) << 2;
+    g = (((RGB8 & green_mask)) >> green_shift) << 2;
+    b = (RGB8 & blue_mask) << 2;
+
+    if ((machine  == Q68) || (machine == Q40))
+        return (g << (11)) | (r << 6) | (b << 1);
+   
+    // Assume QPC High Color (also covers QXL and probably SMSQumulator)
+    return (b << (8)) | (r << 3) | (g >> 2);
+}
+
+
+
+// This quantizes the 3-bit RGB format of the original  picture into
+// black-and-white (which gives a quite unacceptable picture).
+unsigned short RGB8ToMono (unsigned short RGB8) {
+    unsigned short r, b, g;
+    double brightness;
+    // Bring 3-bit-RGB into 565 RGB format
+    r = (((RGB8 & red_mask)) >> red_shift) << 2;
+    g = (((RGB8 & green_mask)) >> green_shift) << 2;
+    b = (RGB8 & blue_mask) << 2;
+
+    brightness = 0.299 * (double)r + 0.587 * (double)g + 0.114 * (double)b;
+
+    if ((int)brightness > 3){
+        return 1;
+    } 
+    return 0;
+}
+
+#ifndef MAXINT
+#define MAXINT 0x7fffffff
+#endif
+
+// This calculates the color distance of a color from the palette and returns the 
+// nearest QL color for interlaced mode (0x00 to 0x77). 
+// 0b111
+// 0b00 R3 R2 R1 00 G3 G2 G1 00 B3 B2 B1 morphs into
+// 0b00 R3 G3 B3 00 00 00 00 00 R2 G2 B2
+unsigned int RGB8ToQLi (int RGB) {
+    char rPart, gPart, bPart;
+    double intensity;
+
+    // Convert color parts to 0-7
+    rPart = (((RGB & red_mask)) >> red_shift);
+    gPart = (((RGB & green_mask)) >> green_shift);
+    bPart = (RGB & blue_mask);
+
+    // calculate average intensity of colour (on a gray-scale)
+    intensity = (rPart + bPart + gPart) / 3.0;
+
+    // QL color is 00 00 00 00 00 G2 R2 B2 00 00 00 00 00 G1 R1 B1
+    if (!interlaced) {
+        return (bPart >= ((intensity > 3.5) ? 4 : 3)) |
+               ((rPart >= ((intensity > 3.5) ? 4 : 3)) << 1) |
+               ((gPart >= ((intensity > 3.5) ? 4 : 3)) << 2);
+    }
+    else {
+        return (bPart >= ((intensity > 3.5) ? 4 : 3)) |
+               ((rPart >= ((intensity > 3.5) ? 4 : 3)) << 1) |
+               ((gPart >= ((intensity > 3.5) ? 4 : 3)) << 2) |
+               ((bPart >= ((intensity > 3.5) ? 3 : 4)) << 8) |
+               ((rPart >= ((intensity > 3.5) ? 3 : 4)) << 9) |
+               ((gPart >= ((intensity > 3.5) ? 3 : 4)) << 10);
+    }
+}
+//#endif
+
+typedef struct
+{
+    short RCorr;
+    short GCorr;
+    short BCorr;
+} colourCorr;
+
+// Same thing, but using Floyd-Steinberg dithering
+// Original pixel used 3 bits/channel, we can only use 2 bits/Channel (or 1 in non-interlaced)
+// distribute the errors to neighboring pixels...
+// This is a bit special, as the forward colour correction values are not stored back to the original
+// picture, but instead held in a separate array (original MS picture is read-only)
+unsigned short RGB8ToQLiFS(unsigned int RGB8, int x, int y) {
+    char r, b, g, newR, newG, newB;
+    short rCorr, bCorr, gCorr;
+    int newCol;
+
+    static colourCorr nextLinCorr [258], thisLinCorr [258];
+    //static colourCorr nextPixCorr;
+    static colourCorr *oldErrors;
+    static colourCorr *newErrors;
+
+    if ((x < 0 )||(x > 250)) return 0;
+
+    // Initialize if we start a new picture
+    if ((x == 0) && (y == 0)) {
+        memset (nextLinCorr, 0, sizeof (nextLinCorr));
+        memset (thisLinCorr, 0, sizeof (thisLinCorr));
+        oldErrors = &(nextLinCorr [1]); // Catches out of bounds at start and end of a line
+        newErrors = &(thisLinCorr [1]);
+    } else if (x == 0) // Initialize if we start a new line
+    {
+        colourCorr *tmp = oldErrors;
+        oldErrors = newErrors;
+        newErrors = tmp;
+        memset(newErrors - sizeof (colourCorr), 0, sizeof(nextLinCorr));
+        //memset(&nextPixCorr, 0, sizeof (colourCorr));
+    }
+
+    // Convert color parts to 0-7
+    r = (((RGB8 & red_mask)) >> red_shift);
+    g = (((RGB8 & green_mask)) >> green_shift);
+    b = (RGB8 & blue_mask);
+
+    // Add the correction values
+    r += (oldErrors [x + 1].RCorr / 16);
+    g += (oldErrors [x + 1].GCorr / 16);
+    b += (oldErrors [x + 1].BCorr / 16);
+
+
+    // Now find the colour errors (in original colour space) that occur when we map the colour values
+    newR = (r > 3) ? 7 : 0; 
+    newG = (g > 3) ? 7 : 0; 
+    newB = (b > 3) ? 7 : 0; 
+
+    rCorr = r - newR; 
+    gCorr = g - newG;
+    bCorr = b - newB;
+
+    //printf ()
+
+    // And apply the correction Values to the correction array
+    // (note correction array is shifted one to the right!)
+    oldErrors [x + 2].RCorr += 7 * rCorr;
+    newErrors [x + 2].RCorr += 1 * rCorr;
+    newErrors [x + 1].RCorr += 5 * rCorr;
+    newErrors [x + 0].RCorr += 3 * rCorr;
+    oldErrors [x + 2].GCorr += 7 * gCorr;
+    newErrors [x + 2].GCorr += 1 * gCorr;
+    newErrors [x + 1].GCorr += 5 * gCorr;
+    newErrors [x + 0].GCorr += 3 * gCorr;
+    oldErrors [x + 2].BCorr += 7 * bCorr;
+    newErrors [x + 2].BCorr += 1 * bCorr;
+    newErrors [x + 1].BCorr += 5 * bCorr;
+    newErrors [x + 0].BCorr += 3 * bCorr;
+
+    // simply fumble the three bits into one number 0-7
+    return (((newB != 0)) | ((newR != 0) << 1) | ((newG != 0) << 2));
+}
+
+// Some functions to get information from the channel definition block
+static struct ConCDBInfo_t *getConInfo (int channel) {
+    struct chan_defb *con;
+    struct ConCDBInfo_t *conInfo;
+    char* anyPointer;
+    long peVersion;
+
+    char** chbas = (char**) *((char**)(_sys_var + 0x78U));
+    unsigned char** chtop = (unsigned char**) *((unsigned char**)(_sys_var + 0x7cU));
+    con = (struct chan_defb*)(chbas [channel & 0xffff]);
+
+    anyPointer = (char*)con;
+
+    conInfo = (struct ConCDBInfo_t*)(anyPointer + sizeof (struct ConCDB_t));
+    anyPointer = (char*) conInfo;
+
+    // With PE, the actual block is $30 bytes further down the road
+    // (note the cast to int is crucial!!!!!)
+    if ((int)iop_pinf (channel, -1, &peVersion) > 0) {
+       conInfo = (struct ConCDBInfo_t *)(anyPointer + 0x30);
+    }
+    return conInfo;
+}
+
+// sets x increment per character in window
+void setCharXInc (int channelId, int xIncr){
+    struct ConCDBInfo_t *conInfo = getConInfo (channelId);
+    conInfo->sd_xinc = xIncr;
+}
+
+// returns y position of cursor
+int getCursorY (int channelId){
+    struct ConCDBInfo_t *conInfo = getConInfo (channelId);
+    return conInfo->sd_ypos;
+}
+
+// returns y increment per character (the height of a line)
+int getYIncr (int channelId) {
+    struct ConCDBInfo_t *conInfo = getConInfo (channelId);
+    return conInfo->sd_yinc;
+}
+
+// returns y origin of window
+int getYMin (int channelId) {
+    struct ConCDBInfo_t *conInfo = getConInfo (channelId);
+    return conInfo->sd_ymin;
+}
+
+// switches window (stdout) to full screen
+void fullScreen (GScreen_t *screenPtr) {
+    QLRECT_t rect;
+
+    rect.q_width = screenPtr->xPix;
+    rect.q_height = screenPtr->yPix;
+    rect.q_x = 0;
+    rect.q_y = 0;
+
+    if (screenPtr->pifPresent) {
+        iop_outl (fgetchid(stdout), -1, 0, 0, 0, &rect);
+    }
+    sd_wdef (fgetchid (stdout), -1, 0, 2, &rect);
+}
+
+QLSTR_INIT(WAITMSG," -PRESS ANY KEY-  ");
+
+void waitKey (void) {
+    char c;
+
+    sd_cure (mainWindow, -1);
+
+    sd_setin (mainWindow, -1, 5);
+    ut_mtext (mainWindow, (QLSTR_t*)&WAITMSG);
+    io_fbyte (mainWindow, -1, &c);
+    linesPrinted = 0;
+    sd_clrln (mainWindow, -1);
+    sd_setin(mainWindow, -1, 7);
+    sd_tab (mainWindow, -1, 0);
+}
+
+void ql_show_pic (type32 c, type8 mode) {
+    
+    if (mode != 0) {
+        type16 w, h, pal[16];
+        register type8 *raw = 0, i;
+        register int x, y;
+        int ofs, yOfs;
+        int curY, oldY, charHeight, pictureHeight;
+
+        // get the picture from the emulator
+        raw = ms_extract (c, &w, &h, pal, 0);
+
+        if ((scrMode == modeHi) && (screen->xPix >= 512)) {
+            w <<= enlarge;
+            h <<= enlarge;
+        }
+
+        // Get the height of a line in pixels
+        charHeight = getYIncr (mainWindow);
+
+        oldY = getCursorY (mainWindow) + getYMin (mainWindow);
+
+        pictureHeight = (h / charHeight) + 2;
+
+        // In case picture would shift unread text out of the window, we wait for a key here!
+        if ((linesPrinted + pictureHeight) >= screenHeight) {
+            io_sbyte (mainWindow, -1, 10);
+            waitKey();
+        }
+
+        // Make room for the picture.
+        for (x = 0; x <= pictureHeight; x++) {
+            io_sbyte (mainWindow, -1, 10);
+            if ((linesPrinted++ + pictureHeight) > screenHeight) {
+                //waitKey ();
+            }
+        }
+
+        fs_flush (mainWindow, -1);
+
+        curY = getCursorY (mainWindow) + getYMin (mainWindow) + 10;
+        //printf ("CurY: %d OldY: %d CharHeight: %d h: %d\n", curY, oldY, charHeight, h);
+
+        ofs = screen->xPix / 2 - w / 2;
+        yOfs = curY - (h + 10);
+
+        if (scrMode == modeHi) {
+            // patch palette to high color
+            for (i = 0; i < 16; i++)
+                pal [i] = RGB8ToRGB16 (pal [i]);
+
+            // Draw picture
+            for (x = 0; x < w; x++) {
+                for (y = 0; y < h; y++) {
+                    unsigned short pixel;
+
+                    pixel = raw [(y >> enlarge) * (w >> enlarge) + (x >> enlarge)];
+                    screen->plot (x + ofs, y + yOfs, pal [pixel]);
+                }
+            }
+        } else if (monoMode != 0) {
+
+        } else {
+            ofs = screen->xPix / 4 - w / 2 + ((tvMode != 0)?16:0);
+
+            // if we are in interlaced mode, before we start doing anything, we copy the complete
+            // screen to the save buffer
+            if (interlaced)
+                init8i ();
+         
+            for (y = 0; y < h; y++) {
+                int pX, pY;
+
+                for (x = 0; x < w-(tvMode?32:0) ; x++) {
+                    unsigned short pixel;
+
+                    pX = x + ofs;
+                    //if (pX > (screen->xPix / 2) - ofs)
+                    //    break;
+
+                    if (tvMode && (pX < 16))
+                        continue;
+
+                    pixel = raw [y * w + x];
+                    pixel = pal [pixel];
+               
+                    // convert the pixel to mode 8 color
+                    if (!dithered)
+                        pixel = RGB8ToQLi (pixel);
+                    else
+                        pixel = RGB8ToQLiFS (pixel, x, y);
+
+                    if (!interlaced)
+                        screen->plot (pX, y + yOfs, pixel & 7);
+                    else
+                        screen->plot (pX, y + yOfs, pixel);
+                }
+            }
+
+            // display the full picture in its glory and wait for any keypress
+            if (interlaced) {
+                assert (screen->saveBuffer != 0);
+                interlace (screen->saveBuffer, screen->shadow);
+            }
+        }
+    }
+}
+
+void ql_screenInit (void) {
+    short dmode = 8, tv = 0;
+    char consoleName [20];
+    QLRECT_t rect;
+
+    if (machine == QL) {
+        // QL must run in mode 8
+        mt_dmode (&dmode, &tv);
+        if (interlaced)
+            screen = graphicsInit (MODE_8i);
+        else
+            screen = graphicsInit (MODE_8);
+        screen->cls ();
+        mt_dmode (&dmode, &tv);
+        scrMode = modeQL;
+    } else {
+        screen = graphicsInit (MODE_QPCHI);
+        scrMode = modeHi;
+        interlaced = 0;
+    }
+    fullScreen (screen);
+    screen->cls();
+    mainWindow = fgetchid (stdout);
+    assert (mainWindow > 0);
+    sprintf (consoleName, "con_%dx12a%dx0", screen->xPix - ((tvMode != 0)? 32 :0), ((tvMode != 0)?32:0));
+    //printf ("consoleName: %s", consoleName);
+    statusWindow = io_open (consoleName,3);
+    assert (statusWindow > 0);
+    assert (statusWindow > 0);
+    sd_setpa (statusWindow, -1, 1);
+    sd_setin (statusWindow, -1, 7);
+    sd_setst (statusWindow, -1, 1);
+    sd_clear (statusWindow, -1);
+    // No cursor in StatusWindow
+    sd_curs (statusWindow, -1);
+
+    if (!tvMode) {
+        rect.q_width = screen->xPix;
+        rect.q_height = screen->yPix - 12;
+        rect.q_x = 0;
+        rect.q_y = 12;
+    }
+    else {
+        rect.q_width = 480;
+        rect.q_height = 244;
+        rect.q_x = 32;
+        rect.q_y = 12;
+    }
+
+    sd_wdef (mainWindow, -1, 0, 0, &rect);
+    sd_setin (mainWindow, -1, 7);
+
+    _endmsg = NULL;
+   
+    // Use small font (we should probably use another DISP_MODE?)
+    if (condensed) {
+        sd_fount (mainWindow, -1, (char*)smallfont, (char*)smallfont);
+        // Note on a QL in mode 8, 8 pixels are actually 4....
+        if (machine == QL)
+            setCharXInc (mainWindow, 8);
+        else
+        {
+            setCharXInc (mainWindow, 4);
+        }
+    }
+
+    // amount of printable characters has changed!
+    sd_chenq (mainWindow, -1, &rect);
+    WIDTH = rect.q_width;
+    screenHeight = rect.q_height - 1; // (need one extra row for "ANY KEY")
+    sd_chenq (statusWindow, -1, &rect);
+    STATUSWIDTH = rect.q_width;
+}
+
+void ql_screenClose (void) {
+    graphicsClose (screen);
+}
+
+void ql_statusChar (type8 c) {
+    static type8 x=0;
+
+    if (c == 0x09) {
+        while (x + 11 < STATUSWIDTH)
+        {
+            io_sbyte(statusWindow, -1, 0x20);
+            x++;
+        }
+        return;
+    }
+    if (c == 0x0a) {
+        x = 0;
+        io_sbyte (statusWindow, -1, 0x0a);
+        return;
+    }
+    io_sbyte (statusWindow, -1, c);
+   
+    x++;
+}
+
+void ql_flush (void) {
+    type8 j;
+
+    if (!bufpos)
+        return;
+    sd_setin (mainWindow, -1, 7);
+    if (xpos + bufpos > WIDTH) {
+        //putchar(0x0a);
+        io_sbyte (mainWindow, -1, 0x0a);
+        //transcript_write(0x0a);
+        xpos = 0;
+        linesPrinted++;
+        if (linesPrinted > screenHeight)
+            waitKey ();
+    }
+    for (j = 0; j < bufpos; j++) {
+        if (buffer[j] == 0x0a) {
+            linesPrinted++;
+            xpos = 0;
+        }
+
+        if (buffer[j] == 0x08) {
+            xpos -= 2;
+            sd_pcol (mainWindow, -1);
+        }
+        // do not try to print backspaces!
+        else
+            io_sbyte (mainWindow, -1, buffer [j]);
+        //transcript_write(buffer[j]);
+        xpos++;
+        if (linesPrinted > screenHeight)
+            waitKey ();
+    }
+    bufpos = 0;
+}
+
+ql_putchar (type8 c) {
+    buffer[bufpos++] = c;
+    if ((c == 0x20) || (c == 0x0a) || (bufpos >= 80))
+        ql_flush();
+}
+
+type8 ql_getchar (type8 trans) {
+    static type8 buf[256];
+    static type8 oldbuf [16][256];
+    static type8 oldbufPos;
+    char *oldString;
+    static type16 pos=0;
+    static int oldLine = 0;
+    static int oldInsert = 0;
+ 
+    int c;
+    type8 i;
+    char *cptr = (char*)buf;
+    int linelen = 0;
+    int done = 0;
+ 
+    if (!pos) {
+        char terminationChar, *c1, *c2;
+ 
+        buf [0] = ' ';
+        sd_setin (mainWindow, -1, 4);
+        do {
+            io_edlin (mainWindow, -1, (char**)&cptr, 256, 0, &linelen);
+                
+            terminationChar = cptr [-1];    
+                
+            switch (terminationChar) {
+                case 0x1b:      /* ESC */
+                    cptr = (char*)buf;
+                    linelen = 0;
+                    memset (buf, 0, 256);
+                    sd_tab (mainWindow, -1, 2);
+                    sd_clrrt (mainWindow, -1);
+                    break;
+                case 0xd0:      /* cursor up */
+                    oldString = (char*)oldbuf [oldLine];
+                    oldLine = (oldLine - 1) & 0xf;
+                    strcpy ((char*)buf, oldString);
+                    cptr = (char*)&(buf [strlen ((char*)buf)]);
+                    linelen = ((strlen ((char*)buf)) << 16) ;//| (strlen ((char*)buf));
+                    done = 0;
+                    //sd_prow (mainWindow, -1);
+                    sd_tab (mainWindow, -1, 2);
+                    sd_clrrt (mainWindow, -1);
+                    break;
+                case 0xd8:      /* cursor down */
+                    oldString = (char*)oldbuf [oldLine];
+                    oldLine = (oldLine + 1) & 0xf;
+                    strcpy ((char*)buf, oldString);
+                    cptr = (char*) &(buf [strlen ((char*)buf)]);
+                    linelen = ((strlen ((char*)buf)) << 16) ;//| (strlen ((char*)buf));
+                    done = 0;
+                    //sd_prow (mainWindow, -1);
+                    sd_tab (mainWindow, -1, 2);
+                    sd_clrrt (mainWindow, -1);
+                    break;
+                case '\n':
+                    if (strfnd ("undo", (char*)buf) != -1){
+                        memset (buf, 0, 256);
+                        return 0;
+                    }
+                    //if (++oldInsert > 15)
+                    //    oldInsert = 0;
+                    c1 = (char*)buf; 
+                    c2 = oldbuf [oldInsert];
+                    while (c1 < cptr) {
+                        // remove termination characters from string
+                        if ((*c1 == 0xd8) || (*c1 == 0xd0) || (*c1 == 0x1b)|| (*c1 == '\n')) {
+                            /* *c2++ = ' '; */
+                            c1++;
+                        } else {   
+                            *c2++ = *c1++;
+                        }
+                    };
+ 
+                    *c2 = *c1 = 0;
+                    /**c2 = 0; Note an ANSI C comment breaks the program here. Why???*/
+                    
+                    done = 1;
+                    oldLine = oldInsert;
+                    oldInsert = (oldInsert + 1) & 0xf;
+                    //memset (buf, 0, 256);
+                    cptr = (char*)buf;
+                    linelen = 0;
+                    pos = 0;
+                    break;
+                default: 
+                    printf ("Unknown termination character %d\n", terminationChar);
+                    break;
+            }
+        } while (!done);
+        sd_setin (mainWindow, -1, 7);
+        linesPrinted = 0;
+    }
+ 
+    if ((c = buf[pos++]) == '\n' || !c) {
+        pos = 0;
+        memset (buf, 0, 256);
+    }
+    
+    //printf ("buf[%d] = %02x ", pos, c);
+    return (type8)c;
+}
+// Some constant strings for the game names
+QLSTR_INIT(pawn, "The Pawn");
+QLSTR_INIT(guild, "The Guild of Thieves");
+QLSTR_INIT(jinx, "Jinxter");
+QLSTR_INIT(corrupt, "Corruption");
+QLSTR_INIT(fish, "Fish!");
+QLSTR_INIT(myth, "Myth");
+QLSTR_INIT(wonder, "Wonderland");
+QLSTR_INIT(unknwn, "Unknown Game");
+
+// This ugly function patches the game name into the job header
+// (note _prog_name apparently does not sit in the job header)
+void ql_setGameName (char *gamename) {
+    jobid_t jobId;
+    char *sysvars;
+    long version;
+    char **jobTable;
+    JOBHEADER_t *jobHeader;
+    unsigned short * jobAddress;
+    //char * _name;
+    QLSTR_t *_name;
+
+    jobId = mt_inf (&sysvars, &version);
+    jobTable = *((char**)((long)sysvars + 0x68L));
+    jobHeader = jobTable [jobId & 0xffff];
+    jobAddress = (unsigned short*)jobHeader->jb_start;
+    
+    // check if we are somewhere near
+    if (jobAddress [3] != 0x4afb) 
+        return;
+    //jobAddress [4] is the string length
+    _name = (QLSTR_t*) (&(jobAddress [4]));
+
+    // shorten name length to "Magnetic Scrolls " - we have enough space reserved there
+    _name->qs_strlen = 17;
+    if (strfnd ("pawn", gamename) != -1)
+        qstrcat (_name, (const QLSTR_t*)&pawn);
+    else if (strfnd ("guild", gamename) != -1)
+        qstrcat(_name, (const QLSTR_t *)&guild);
+    else if (strfnd ("jinxter", gamename) != -1)
+        qstrcat(_name, (const QLSTR_t *)&jinx);
+    else if (strfnd ("corrupt", gamename) != -1)
+        qstrcat(_name, (const QLSTR_t *)&corrupt);
+    else if (strfnd ("fish", gamename) != -1)
+        qstrcat(_name, (const QLSTR_t *)&fish);
+    else if (strfnd ("myth", gamename) != -1)
+        qstrcat(_name, (const QLSTR_t *)&myth);
+    else if (strfnd ("wonder", gamename) != -1)
+        qstrcat(_name, (const QLSTR_t *)&wonder);
+    else
+        qstrcat (_name, (const QLSTR_t*)&unknwn);
+}
+/* end of QL-Specific parts */

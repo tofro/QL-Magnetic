@@ -1,0 +1,114 @@
+#ifndef GRAPHICS_H_INCLUDED
+#define GRAPHICS_H_INCLUDED
+
+// Note MODE8i is interlaced 2nd screen!
+#define MODE_DONTCARE -1
+#define MODE_4 0
+#define MODE_8 8
+#define MODE_8i 9
+#define MODE_256 16
+#define MODE_QPCHI 32
+#define MODE_QxxHI 33
+
+/* Should bitmap functions be included? */
+#define BITMAP 0
+
+/* QPC hi-color mode */
+#define RGB32(r,g,b) ((((r) & 0x1f) << 11) | (((g) & 0x1f) << 5) | ((b) & 0x1f))
+/* Q40/60 and Q68 color modes (ignore the "w" bit) */
+#define RGB33(r,g,b) ((((g) & 0x1f) << 11) | (((r) & 0x1f) << 6) | ((b) & 0x1f << 1 ))
+
+#pragma PACK urpsl
+
+/* Struct that holds a bit of a saved screen pixmap            */
+/* Note without further addo, this pixmap can only be put back */
+/* exactly to the place it came from!                          */
+#ifdef BITMAP
+typedef struct SAVE_AREA {
+   unsigned short width;
+   unsigned short height;
+   unsigned short lineLen;
+   unsigned short *baseAddress;
+   unsigned int buffLen;
+   unsigned char bytes [1];
+} SaveArea_t;
+#endif
+
+typedef struct QLMODE_BUFFER {
+   unsigned short leftBitMask;
+   unsigned short rightBitMask;
+   unsigned short x, y, w, h;
+   unsigned short *scrStart;
+   unsigned short lineLen;
+   unsigned short buffer [1];
+} QLModeBuffer_t;
+
+typedef struct COORD {
+	unsigned short x;
+	unsigned short y;
+} Coordinate_t;
+
+typedef void(*PlotFunc_t)(int x, int y, int col);
+typedef void(*LineFunc_t)(int x1, int y1, int x2, int y2, int col);
+typedef void(*BlockFunc_t)(int x1, int y1, int w, int h, int col);
+typedef void(*CircleFunc_t)(int x0, int y0, int radius, int col);
+typedef void(*ClsFunc_t)(void);
+typedef int (*GetPixelFunc_t)(int x, int y);
+typedef void(*FloodFillFunc_t)(int x, int y, int oldColor, int newColor);
+typedef QLModeBuffer_t* (*ScrToMemFunc_t)(QLModeBuffer_t *buf, int x, int y, int w, int h);
+typedef void(*MemToScrFunc_t)(QLModeBuffer_t *buf);
+typedef SaveArea_t *(*SaveFunc_t)(int x, int y, int w, int h);
+typedef void (*ScrollFunc_t)(int num);
+typedef void (*PanFunc_t)(int num);
+typedef void (*DisplayFunc_t)(void);
+
+typedef struct GSCREEN {
+   unsigned int xPix;
+   unsigned int yPix;
+   unsigned int lineLen;
+   unsigned int bpp;
+   unsigned char *baseAddress;
+   short mode;
+   short tvMode;
+   short oldMode;
+   short oldTVMode;
+   unsigned char** lineStartTab; 
+
+   PlotFunc_t plot;
+   LineFunc_t line;
+   CircleFunc_t circle;
+   CircleFunc_t fcircle;
+   BlockFunc_t block;
+   ClsFunc_t cls;
+   GetPixelFunc_t getPixel;
+   FloodFillFunc_t floodFill;
+#ifdef BITMAP   
+   ScrToMemFunc_t scrToMem;
+   MemToScrFunc_t memToScr;
+#endif
+   ScrollFunc_t scroll;
+   PanFunc_t pan;
+
+   DisplayFunc_t display;
+
+   char pifPresent;
+
+
+
+   // next are for MODE8i
+   char interlaced;  // has interlaced display
+   char displaying;  // interlaced display active (i.e. SV mode!)
+   // Buffer to save memory occupied by 2nd screen
+   unsigned char *saveBuffer; 
+   // Buffer to plot into when in mode 8i
+   unsigned char *shadow;
+
+} GScreen_t;
+
+
+GScreen_t *graphicsInit(int mode);
+void graphicsClose (GScreen_t *);
+// Init8i copies the currrent screen into the back buffer and allows new 8i drawings
+void init8i (void);
+
+#endif

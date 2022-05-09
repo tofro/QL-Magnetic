@@ -1,0 +1,301 @@
+/****************************************************************************\
+*
+* Magnetic - Magnetic Scrolls Interpreter.
+*
+* Written by Niclas Karlsson <nkarlsso@abo.fi>,
+*            David Kinder <davidk.kinder@virgin.net>,
+*            Stefan Meier <Stefan.Meier@if-legends.org> and
+*            Paul David Doherty <pdd@if-legends.org>
+*
+* Copyright (C) 1997-2008  Niclas Karlsson
+*
+*     This program is free software; you can redistribute it and/or modify
+*     it under the terms of the GNU General Public License as published by
+*     the Free Software Foundation; either version 2 of the License, or
+*     (at your option) any later version.
+*
+*     This program is distributed in the hope that it will be useful,
+*     but WITHOUT ANY WARRANTY; without even the implied warranty of
+*     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+*     GNU General Public License for more details.
+*
+*     You should have received a copy of the GNU General Public License
+*     along with this program; if not, write to the Free Software
+*     Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111, USA.
+*
+*     Simple ANSI interface main.c
+*
+\****************************************************************************/
+
+#include <stdio.h> 
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include "defs_h"
+
+#include "ql_h"
+
+
+
+type8 log_on = 0, ms_gfx_enabled, filename[256];
+FILE *logfile1 = 0, *logfile2 = 0;
+
+type8 ms_load_file(type8s *name, type8 *ptr, type16 size)
+{
+    FILE *fh;
+    type8s *realname;
+
+    if (name)
+        realname = name;
+    else
+    {
+        do
+        {
+            printf("Filename: ");
+        }
+        while (!gets(filename));
+        realname = filename;
+    }
+    if (!(fh=fopen(realname,"rb")))
+        return 1;
+    if (fread(ptr,1,size,fh) != size)
+        return 1;
+    fclose(fh);
+    return 0;
+}
+
+type8 ms_save_file(type8s *name, type8 *ptr, type16 size)
+{
+    FILE *fh;
+    type8s *realname;
+
+    if (name)
+        realname = name;
+    else
+    {
+        do
+        {
+            printf("Filename: ");
+        }
+        while (!gets(filename));
+        realname = filename;
+    }
+    if (!(fh = fopen(realname,"wb")))
+        return 1;
+    if (fwrite(ptr,1,size,fh) != size)
+        return 1;
+    fclose(fh);
+    return 0;
+}
+
+void script_write(type8 c)
+{
+    if (log_on == 2 && fputc(c,logfile1) == EOF)
+    {
+        printf("[Problem with script file - closing]\n");
+        fclose(logfile1);
+        log_on = 0;
+    }
+}
+
+void transcript_write(type8 c)
+{
+    if (logfile2 && c == 0x08 && ftell(logfile2) > 0)
+        fseek(logfile2,-1,SEEK_CUR);
+    else if (logfile2 && fputc(c,logfile2) == EOF)
+    {
+        printf("[Problem with transcript file - closing]\n");
+        fclose(logfile2);
+        logfile2 = 0;
+    }
+}
+
+// puts a character to the status line on top of screen
+void ms_statuschar(type8 c)
+{
+    ql_statuschar (c);
+}
+
+void ms_flush(void) {
+    ql_flush ();
+}
+
+void ms_putchar(type8 c) {
+    ql_putchar (c);
+}
+
+
+/****************************************************************************\
+* Function: ms_getchar
+*
+* Purpose: Read user input, buffered
+*
+* Parameters:   type8   trans           if not 0, translate any #undo
+*                                       input to a return code of 0
+*
+* Return: One character
+*
+* Note: The first time it is called a string should be read and then given
+*       back one byte at a time (ie. one for each call) until a '\n' is
+*       reached (which will be the last byte sent back before it all restarts)
+*       Returning a zero means 'undo' and the rest of the line must then be
+*       ignored.
+*       Returning 1 means that the opcode should return immediately. This is
+*       needed to prevent possible corruption of the game's memory in
+*       interpreters which allow a new game to be loaded without restarting.
+\****************************************************************************/
+type8 ms_getchar(type8 trans) {
+    return ql_getchar (trans);
+}
+
+// displays a MS picture on QL screen
+void ms_showpic(type32 c,type8 mode) {
+    ql_show_pic (c, mode);
+}
+
+void ms_fatal(type8s *txt) {
+    fputs("\nFatal error: ",stderr);
+    fputs((char*)txt,stderr);
+    fputs("\n",stderr);
+    ms_status();
+    exit(1);
+}
+
+type8 ms_showhints(struct ms_hint * hints) {
+    return 0;
+}
+
+void ms_playmusic(type8 * midi_data, type32 length, type16 tempo) {
+}
+
+//extern long _stack = 65536;
+//extern long _mneed = 500000;
+
+main(int argc, char **argv) {
+    type8 running, i, *gamename = 0, *gfxname = 0, *hintname = 0;
+    type32 dlimit, slimit;
+    //char consoleName [20];
+    //QLRECT_t rect;
+
+    //int x1, y1, x2, y2, col;
+
+    //type16 dmode = 8, tv = 0;
+
+    // find what type of machine we are working on
+    machine = ql_getMachineType ();
+    //machine = QL;
+    
+    if (sizeof(type8) != 1 || sizeof(type16) != 2 || sizeof(type32) != 4)
+    {
+        fprintf(stderr,
+            "You have incorrect typesizes, please edit the typedefs and recompile\n"
+            "or proceed on your own risk...\n");
+        exit(1);
+    }
+
+    dlimit = slimit = 0xffffffff;
+    for (i = 1; i < argc; i++)
+    {
+        if (argv[i][0] == '-')
+        {
+            switch (tolower(argv[i][1]))
+            {
+            case 'm':
+                monoMode = 1;
+                break;
+            case 'd':
+                if (strlen(argv[i]) > 2)
+                    dlimit = atoi(&argv[i][2]);
+                else
+                    dlimit = 0;
+                break;
+            case 's':
+                if (strlen(argv[i])>2)
+                    slimit = atoi(&argv[i][2]);
+                else
+                    slimit = 655360;
+                break;
+            case 't':
+                tvMode = 1;
+                machine = QL;
+                break;
+            case 'f':
+                dithered = 1;
+                break;
+            case 'i':
+                // interlaced graphics mode
+                if (machine == QL) {
+                    //svBuffer = malloc (32768);
+                    interlaced = 1;
+                }
+                else {
+                    printf ("Interlaced mode is only supported on BBQL\n");
+                    printf ("Your machine is a %d\n", machine);
+                    exit (-1);
+                }
+                break;
+            case 'c':
+                // condensed font
+                condensed = 1;
+                break;
+            case 'q':
+                machine = QL;
+                break;
+            case 'e':
+                enlarge = 1;
+                break;
+            default:
+                printf("Unknown option -%c, ignoring.\n",argv[i][1]);
+                break;
+            }
+        }
+        else if (!gamename)
+            gamename = (type8*)argv[i];
+        else if (!gfxname)
+            gfxname = (type8*)argv[i];
+        else if (!hintname)
+            hintname = (type8*)argv[i];
+    }
+                    
+    ql_setGameName (gamename);
+    ql_screenInit ();
+
+    if (!gamename)
+    {
+        printf("Magnetic 2.3 - a Magnetic Scrolls interpreter\n\n");
+        printf("Usage: %s game [gfxfile]\n\n"
+            ,argv[0]);
+        exit(1);
+    }
+
+    if (!(ms_gfx_enabled = ms_init((type8s*)gamename,(type8s*)gfxname,(type8s*)hintname,0)))
+    {
+        printf("Couldn't start up game \"%s\".\n",gamename);
+        exit(1);
+    }
+
+    ms_gfx_enabled--;
+    running = 1;
+    
+    while ((ms_count() < slimit) && running)
+    {
+        if (ms_count() >= dlimit)
+            ms_status();
+        running = ms_rungame();
+    }
+    if (ms_count() == slimit)
+    {
+        printf("\n\nSafety limit (%d) reached.\n",slimit);
+        ms_status();
+    }
+    ms_freemem();
+    if (log_on)
+        fclose(logfile1);
+    if (logfile2)
+        fclose(logfile2);
+    printf("\nExiting.\n");
+
+    ql_screenClose ();
+
+    return 0;
+}
