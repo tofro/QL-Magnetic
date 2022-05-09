@@ -1,6 +1,8 @@
 # QL-Magnetic
 Magnetic Scrolls adventure interpreter for the SInclair QL and derivates. After nearly 40 years, The Pawn is back to where it all began.
 
+![High-Colour Screen Shot (Q68)](https://github.com/tofro/QL-Magnetic/blob/main/PawnCastleHC.png)
+
 Magnetic Scrolls Adventures on the QL and QL-alikes
 ---------------------------------------------------
 
