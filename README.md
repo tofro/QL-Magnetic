@@ -45,7 +45,8 @@ The hint system and music support that were in some of the later MS games is not
 supported. Furthermore, the graphic animations in later games (for example the cut scene
 when falling down the rabbit hole in "Wonderland") is not supported. The animations will
 be shown as static pictures. I hope and assume this doesn't take too much away from the
-original experience.
+original experience. Considering the original "Pawn" for the QL had no graphics at all,
+that shouldn't be too much of a loss...
 
 The software plays all 7 MS games
  - The Pawn
