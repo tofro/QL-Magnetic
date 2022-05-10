@@ -140,6 +140,8 @@ are supported:
   -q assume we're running on a QL. Useful if you want to run the game on a "better"
      platform in MODE 8 (why would anyone want to do that?)
    
+If you don't want graphics, simply leave off the _gfx file from the command line - This might 
+indeed make the game run on some 640k QLs.
 
 To use the command line switches, place them on the command line (where else?) before any
 file names, separated by spaces, so for running The Pawn in dithered colours on an SGC QL,
