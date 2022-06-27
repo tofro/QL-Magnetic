@@ -2,6 +2,7 @@
 Magnetic Scrolls adventure interpreter for the SInclair QL and derivates. After nearly 40 years, The Pawn is back to where it all began.
 
 ![High-Colour Screen Shot (Q68)](https://github.com/tofro/QL-Magnetic/blob/main/PawnCastleHC.png)
+The Pawn on a Q68 in High-Colour mode 32
 
 Magnetic Scrolls Adventures on the QL and QL-alikes
 ---------------------------------------------------
@@ -152,6 +153,7 @@ DATA_USE win1_magnetic : EX win1_magnetic_magnetic_exe;"-c -t -f pawn_mag pawn_g
 Some comments on what you can expect to work on a classic QL
 ------------------------------------------------------------
 ![Dithered graphics on original QL](https://github.com/tofro/QL-Magnetic/blob/main/PawnGuruMODE8.png)
+This is how Floyd-Steinberg-dithered Graphics look on an original QL in MODE 8
 
 Some of the games can be run on an original QL with a Tetroid Trump Card with no further
 software loaded (maybe even from floppy, I didn't try what fits and what doesn't).
