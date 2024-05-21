@@ -59,7 +59,7 @@ extern void interlace (unsigned char* saveArea, unsigned char* secondScreen);
 machineType ql_getMachineType () {
     const unsigned char * _machineType = (const unsigned char *) ((unsigned)_sys_var + 0xa7U);
     machineType returns;
-    printf ("Machine %x", _machineType);
+    // printf ("Machine %x", _machineType);
     switch ((*_machineType) & 0x1e) {
         case 0x1e:
             returns = QPC;
@@ -88,6 +88,7 @@ machineType ql_getMachineType () {
 }
 
 // Masks for magnetic colour extraction
+// 00000RRR00000GGG0BBB
 const int red_mask = 0x0700;
 const int red_shift = 8;
 const int green_mask = 0x0070;
@@ -187,12 +188,13 @@ unsigned short RGB8ToQLiFS(unsigned int RGB8, int x, int y) {
     short rCorr, bCorr, gCorr;
     int newCol;
 
-    static colourCorr nextLinCorr [258], thisLinCorr [258];
+    static colourCorr nextLinCorr [259], thisLinCorr [259];
     //static colourCorr nextPixCorr;
     static colourCorr *oldErrors;
     static colourCorr *newErrors;
 
-    if ((x < 0 )||(x > 250)) return 0;
+    if ((x > 250) || (x < 0)) return 0;
+    if ((y > 250) || (y < 0)) return 0;
 
     // Initialize if we start a new picture
     if ((x == 0) && (y == 0)) {
@@ -218,7 +220,6 @@ unsigned short RGB8ToQLiFS(unsigned int RGB8, int x, int y) {
     r += (oldErrors [x + 1].RCorr / 16);
     g += (oldErrors [x + 1].GCorr / 16);
     b += (oldErrors [x + 1].BCorr / 16);
-
 
     // Now find the colour errors (in original colour space) that occur when we map the colour values
     newR = (r > 3) ? 7 : 0; 
@@ -341,12 +342,13 @@ void ql_show_pic (type32 c, type8 mode) {
         // get the picture from the emulator
         raw = ms_extract (c, &w, &h, pal, 0);
 
+        // Double picture width and height of enlarge is on
         if ((scrMode == modeHi) && (screen->xPix >= 512)) {
             w <<= enlarge;
             h <<= enlarge;
         }
 
-        // Get the height of a line in pixels
+        // Get the height of a text line in pixels
         charHeight = getYIncr (mainWindow);
 
         oldY = getCursorY (mainWindow) + getYMin (mainWindow);
@@ -390,7 +392,7 @@ void ql_show_pic (type32 c, type8 mode) {
                 }
             }
         } else if (monoMode != 0) {
-
+            // #### Not implemented yet
         } else {
             ofs = screen->xPix / 4 - w / 2 + ((tvMode != 0)?16:0);
 
@@ -464,7 +466,6 @@ void ql_screenInit (void) {
     sprintf (consoleName, "con_%dx12a%dx0", screen->xPix - ((tvMode != 0)? 32 :0), ((tvMode != 0)?32:0));
     //printf ("consoleName: %s", consoleName);
     statusWindow = io_open (consoleName,3);
-    assert (statusWindow > 0);
     assert (statusWindow > 0);
     sd_setpa (statusWindow, -1, 1);
     sd_setin (statusWindow, -1, 7);
