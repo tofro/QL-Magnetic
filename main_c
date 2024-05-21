@@ -171,6 +171,20 @@ void ms_playmusic(type8 * midi_data, type32 length, type16 tempo) {
 //extern long _stack = 65536;
 //extern long _mneed = 500000;
 
+void usage (void) {
+    puts ("");
+    puts ("ex magnetic_exe; <options> <magfile>_mag [<graphfile>_gfx]");
+    puts (" With no <graphfile>, the programs will run in pure text mode");
+    puts ("Options:");
+    puts ("  -m monochrome mode (not implemented atm)");
+    puts ("  -t TV Mode (for BBQLs)");
+    puts ("  -f use Floyd-Steinberg-dithered graphics (for BBQLs in MODE 8)");
+    puts ("  -i interlaced graphics mode (only BBQLs in MODE 8)");
+    puts ("  -c use a condensed font (for BBQls in MODE 8)");
+    puts ("  -q force BBQL mode on better platforms");
+    puts ("  -e Enlarge graphics * 2");
+}
+
 main(int argc, char **argv) {
     type8 running, i, *gamename = 0, *gfxname = 0, *hintname = 0;
     type32 dlimit, slimit;
@@ -243,6 +257,10 @@ main(int argc, char **argv) {
                 break;
             case 'e':
                 enlarge = 1;
+                break;
+            case '?':
+                usage ();
+                exit (0);
                 break;
             default:
                 printf("Unknown option -%c, ignoring.\n",argv[i][1]);
