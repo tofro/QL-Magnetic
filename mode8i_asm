@@ -124,7 +124,7 @@ notKey  bset     #3,PC_INTR
         bra.s   intLp                   ; loop around forever
 
 keyPressed
-        move.b  #MC_LORES,MC_STAT       ; back to normal screen, mode 4
+        move.b  #MC_LORES,MC_STAT       ; back to normal screen, mode 8
         move.l  svBuff(pc),a0           ; source address: where we saved the System Variables
         lea.l   secondScreen,a1         ; destination: Back where it belongs
         bsr     fastcpy                 ; copy it
