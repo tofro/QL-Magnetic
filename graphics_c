@@ -24,6 +24,8 @@
 
 #undef NDEBUG
 
+#define MAGNETIC 1
+
 // size of fill stack - adjust for complicated forms
 #define FSTACKSIZ 1024
 
@@ -103,6 +105,8 @@ void plot4(int x, int y, int col)
    *screenWord |= colorMask;
 }
 
+
+#ifndef MAGNETIC
 // getPixel4 - mode 4 specific getPixel
 // Get the color of a pixel at screen coordinatex x, y
 // coordinates are _not_ checked for validity!
@@ -364,6 +368,8 @@ void fCircle(int x0, int y0, int radius, int col)
    }
 }
 
+#endif 
+
 // cls - generic cls function
 void cls()
 {
@@ -469,6 +475,8 @@ static void display()
 {
 }
 
+#ifndef MAGNETIC
+
 void block8(int x1, int y1, int w, int h, int col)
 {
    unsigned int xr1;
@@ -526,6 +534,8 @@ int getPixel8(int x, int y)
 {
 }
 
+#endif
+
 // Graphics functions for mode 256. Those are the most simple, all byte-sized pixels
 void plot256(int x, int y, int col)
 {
@@ -538,6 +548,8 @@ void plot256(int x, int y, int col)
    screenByte = theScreen->lineStartTab[y] + x;
    *screenByte = col;
 }
+
+#ifndef MAGNETIC
 
 int getPixel256(int x, int y)
 {
@@ -560,6 +572,8 @@ void block256(int x1, int y1, int w, int h, int col)
       }
    }
 }
+
+#endif
 
 /***************************************************/
 /* Graphics functions for Hi-color modes 32 and 33 */
@@ -584,6 +598,8 @@ void plotHi(int x, int y, int col)
    /* Set the relevant pixel to the color */
    *screenWord = col;
 }
+
+#ifndef MAGNETIC
 
 // getPixelHi
 // Get the color of a pixel at screen coordinatex x, y
@@ -660,6 +676,8 @@ void blockHi(int x1, int y1, int w, int h, int col)
       }
    }
 }
+
+#endif 
 
 #ifdef BITMAP
 /* Bitmap shoving functions start here */
@@ -746,6 +764,8 @@ void mem4ToScr(QLModeBuffer_t *buffer)
 }
 #endif
 
+#ifndef MAGNETIC
+
 // Scroll screen up or down by num pixels
 void scrollScr(int num)
 {
@@ -820,6 +840,8 @@ void panScr(int num)
       }
    }
 }
+
+#endif 
 
 #ifdef BITMAP
 /* 
@@ -900,6 +922,8 @@ void memHiToScr(QLModeBuffer_t *buffer)
 }
 #endif
 
+#ifndef MAGNETIC
+
 static void dumpCDB(GScreen_t *screen, struct ConCDB_t *con)
 {
    struct ConCDBInfo_t *conInfo;
@@ -944,6 +968,8 @@ static void dumpCDB(GScreen_t *screen, struct ConCDB_t *con)
    printf("Border: \t %d\n", conInfo->sd_bcolr);
    printf("Line len\t %x\n", conInfo->sd_linel);
 }
+
+#endif
 
 // Pick up relevant information from Pointer I/F, if present
 // fills xPix, yPix and pifPresent of the GScreen struct
@@ -1125,77 +1151,88 @@ GScreen_t *graphicsInit(int mode)
    {
    case MODE_4:
       returns->plot = plot4;
+      #ifndef MAGNETIC
       returns->line = line;
       returns->block = block4;
       returns->circle = circle;
       returns->fcircle = fCircle;
-      returns->cls = cls;
       returns->getPixel = getPixel4;
-      returns->bpp = 2;
       returns->scrToMem = scrToMem4;
       returns->memToScr = mem4ToScr;
       returns->scroll = scrollScr;
       returns->pan = panScr;
+      #endif
+      returns->cls = cls;
+      returns->bpp = 2;
       break;
    case MODE_8:
       returns->plot = plot8;
+      #ifndef MAGNETIC
       returns->line = line;
       returns->block = block8;
       returns->circle = circle;
       returns->fcircle = fCircle;
-      returns->cls = cls;
       returns->getPixel = getPixel8;
-      returns->bpp = 4;
       returns->scrToMem = scrToMem4;
       returns->memToScr = mem4ToScr;
       returns->scroll = scrollScr;
       returns->pan = panScr;
+      #endif
+      returns->cls = cls;
+      returns->bpp = 4;
       //returns->xPix = 256;
       break;
    case MODE_8i:
       returns->plot = plot8i;
+      #ifndef MAGNETIC
       returns->line = line;
       returns->block = block8;
       returns->circle = circle;
       returns->fcircle = fCircle;
-      returns->cls = cls;
-      returns->getPixel = getPixel8;
-      returns->bpp = 4;
       returns->scrToMem = scrToMem4;
       returns->memToScr = mem4ToScr;
       returns->scroll = scrollScr;
       returns->pan = panScr;
+      returns->getPixel = getPixel8;
+      #endif
+      returns->cls = cls;
+      returns->bpp = 4;
+      
       returns->display = display;
       //returns->xPix = 256;
 
       break;
    case MODE_256:
       returns->plot = plot256;
+      #ifndef MAGNETIC
       returns->line = line;
       returns->circle = circle;
       returns->block = block256;
-      returns->cls = cls;
       returns->floodFill = floodFill;
       returns->scroll = scrollScr;
       returns->pan = panScr;
       returns->getPixel = getPixel256;
+      #endif
+      returns->cls = cls;
       returns->bpp = 8;
       break;
    case MODE_QPCHI:
    case MODE_QxxHI:
       returns->plot = plotHi;
+      #ifndef MAGNETIC
       returns->line = line;
       returns->block = blockHi;
       returns->circle = circle;
       returns->fcircle = fCircle;
       returns->floodFill = floodFill;
-      returns->cls = cls;
       returns->getPixel = getPixelHi;
-      returns->bpp = 16;
       returns->scrToMem = scrToMemHi;
       returns->memToScr = memHiToScr;
       returns->scroll = scrollScr;
       returns->pan = panScr;
+      #endif
+      returns->cls = cls;
+      returns->bpp = 16;
       break;
    }
    // Now, some things need to be done last
@@ -1212,6 +1249,8 @@ GScreen_t *graphicsInit(int mode)
 void graphicsClose(GScreen_t *screen)
 {
    free(screen->lineStartTab);
+   screen->oldMode = 4;
+   screen->oldTVMode = 0;
    mt_dmode(&screen->oldMode, &screen->oldTVMode);
    free(screen);
    theScreen = NULL;
